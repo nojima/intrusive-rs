@@ -1,6 +1,4 @@
-use std::{
-    ptr::{null_mut, NonNull},
-};
+use std::ptr::{null_mut, NonNull};
 
 #[derive(Debug)]
 pub struct Hook<Outer> {
@@ -41,7 +39,10 @@ unsafe fn get_hook<Outer, const OFFSET: usize>(p: *mut Outer) -> *mut Hook<Outer
     p.byte_add(OFFSET) as *mut Hook<Outer>
 }
 
-pub unsafe fn push_front<Outer, const OFFSET: usize>(head: *mut Outer, new_node: *mut Outer) -> *mut Outer {
+pub unsafe fn push_front<Outer, const OFFSET: usize>(
+    head: *mut Outer,
+    new_node: *mut Outer,
+) -> *mut Outer {
     unsafe {
         let new_hook = get_hook::<_, OFFSET>(new_node);
         if head.is_null() {
@@ -60,10 +61,7 @@ pub unsafe fn push_front<Outer, const OFFSET: usize>(head: *mut Outer, new_node:
     }
 }
 
-pub unsafe fn unlink<Outer, const OFFSET: usize>(
-    head: *mut Outer,
-    node: *mut Outer,
-) -> *mut Outer {
+pub unsafe fn unlink<Outer, const OFFSET: usize>(head: *mut Outer, node: *mut Outer) -> *mut Outer {
     assert_ne!(node, null_mut());
     unsafe {
         let node_hook = get_hook::<_, OFFSET>(node);
@@ -129,7 +127,9 @@ mod tests {
 
     fn print_list(head: *mut Entry) {
         let v: Vec<_> = unsafe {
-            iterate::<Entry, HOOK_OFFSET>(head).map(|p| p.as_ref().x).collect()
+            iterate::<Entry, HOOK_OFFSET>(head)
+                .map(|p| p.as_ref().x)
+                .collect()
         };
         println!("{:?}", v);
     }
