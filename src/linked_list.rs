@@ -1,5 +1,31 @@
 use std::ptr::{null_mut, NonNull};
 
+pub struct LinkedList<Outer, const OFFSET: usize> {
+    head: *mut Outer,
+}
+
+impl<Outer, const OFFSET: usize> LinkedList<Outer, OFFSET> {
+    pub fn new() -> Self {
+        Self { head: null_mut() }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.head.is_null()
+    }
+
+    pub unsafe fn push_front(&mut self, new_node: *mut Outer) {
+        self.head = push_front::<Outer, OFFSET>(self.head, new_node);
+    }
+
+    pub unsafe fn unlink(&mut self, node: *mut Outer) {
+        self.head = unlink::<Outer, OFFSET>(self.head, node);
+    }
+
+    pub fn iter(&mut self) -> impl Iterator<Item = NonNull<Outer>> {
+        unsafe { iterate::<Outer, OFFSET>(self.head) }
+    }
+}
+
 #[derive(Debug)]
 pub struct Hook<Outer> {
     next: *mut Outer,
@@ -104,17 +130,18 @@ mod tests {
 
     #[test]
     fn test_linked_list() {
-        let mut head: *mut Entry = null_mut();
+        let mut list = LinkedList::<Entry, HOOK_OFFSET>::new();
         for i in 0..10 {
             let p = Box::into_raw(Box::new(Entry {
                 x: i,
                 ..Default::default()
             }));
-            head = unsafe { push_front::<_, HOOK_OFFSET>(head, p) };
+            unsafe { list.push_front(p) };
         }
-        for p in unsafe { iterate::<Entry, HOOK_OFFSET>(head) } {
+        for p in list.iter() {
             let x = unsafe { p.as_ref() }.x;
             println!("{}", x);
+            // deallocate
             unsafe { drop(Box::from_raw(p.as_ptr())) };
         }
     }
@@ -125,19 +152,15 @@ mod tests {
         Unlink(usize),
     }
 
-    fn print_list(head: *mut Entry) {
-        let v: Vec<_> = unsafe {
-            iterate::<Entry, HOOK_OFFSET>(head)
-                .map(|p| p.as_ref().x)
-                .collect()
-        };
+    fn print_list(list: &mut LinkedList<Entry, HOOK_OFFSET>) {
+        let v: Vec<_> = unsafe { list.iter().map(|p| p.as_ref().x).collect() };
         println!("{:?}", v);
     }
 
     #[test]
     fn randomized_test() {
         let mut expected = VecDeque::new();
-        let mut head: *mut Entry = null_mut();
+        let mut list = LinkedList::<Entry, HOOK_OFFSET>::new();
 
         for i in 0..1000 {
             let action = {
@@ -151,16 +174,8 @@ mod tests {
                     }
                 }
             };
-            print_list(head);
-            println!(
-                "head = {}, action = {:?}",
-                if head.is_null() {
-                    "null".to_owned()
-                } else {
-                    format!("{:?}", unsafe { head.as_mut().unwrap() })
-                },
-                action
-            );
+            print_list(&mut list);
+            println!("action = {:?}", action);
             match action {
                 Action::PushFront(x) => {
                     expected.push_front(x);
@@ -169,26 +184,29 @@ mod tests {
                         x,
                         ..Default::default()
                     }));
-                    head = unsafe { push_front::<_, HOOK_OFFSET>(head, new_entry) }
+                    unsafe { list.push_front(new_entry) };
                 }
                 Action::Unlink(idx) => {
                     let expected_x = expected.remove(idx).unwrap();
 
-                    let entry = unsafe { iterate::<Entry, HOOK_OFFSET>(head) }
-                        .nth(idx)
-                        .unwrap();
-                    let actual_x = unsafe { entry.as_ref().x };
-                    head = unsafe { unlink::<_, HOOK_OFFSET>(head, entry.as_ptr()) };
+                    unsafe {
+                        let entry = list.iter().nth(idx).unwrap();
+                        let actual_x = entry.as_ref().x;
+                        list.unlink(entry.as_ptr());
 
-                    assert_eq!(expected_x, actual_x);
+                        assert_eq!(expected_x, actual_x);
 
-                    unsafe { drop(Box::from_raw(entry.as_ptr())) };
+                        drop(Box::from_raw(entry.as_ptr()));
+                    }
                 }
             }
         }
+
         // deallocate
-        for p in unsafe { iterate::<Entry, HOOK_OFFSET>(head) } {
-            unsafe { drop(Box::from_raw(p.as_ptr())) };
+        for p in list.iter() {
+            unsafe {
+                drop(Box::from_raw(p.as_ptr()));
+            }
         }
     }
 }
