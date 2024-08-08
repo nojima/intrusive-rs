@@ -1,15 +1,14 @@
 use std::{
-    marker::PhantomData,
     ptr::{null_mut, NonNull},
 };
 
 #[derive(Debug)]
-pub struct Hook {
-    next: *mut Hook,
-    prev: *mut Hook,
+pub struct Hook<Outer> {
+    next: *mut Outer,
+    prev: *mut Outer,
 }
 
-impl Default for Hook {
+impl<Outer> Default for Hook<Outer> {
     fn default() -> Self {
         Self {
             next: null_mut(),
@@ -18,55 +17,67 @@ impl Default for Hook {
     }
 }
 
-pub struct Iter<Entry, const OFFSET: usize> {
-    p: *mut Hook,
-    _phantom: PhantomData<fn() -> Entry>,
+pub struct Iter<Outer, const OFFSET: usize> {
+    p: *mut Outer,
 }
 
-impl<Entry, const OFFSET: usize> Iterator for Iter<Entry, OFFSET> {
-    type Item = NonNull<Entry>;
+impl<Outer, const OFFSET: usize> Iterator for Iter<Outer, OFFSET> {
+    type Item = NonNull<Outer>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.p.is_null() {
             return None;
         }
         unsafe {
-            let entry = self.p.byte_sub(OFFSET) as *mut Entry;
-            self.p = (*self.p).next;
-            Some(NonNull::new_unchecked(entry))
+            let item = NonNull::new_unchecked(self.p);
+            let hook = self.p.byte_add(OFFSET) as *mut Hook<Outer>;
+            self.p = (*hook).next;
+            Some(item)
         }
     }
 }
 
-pub unsafe fn push_front(head: *mut Hook, new_node: *mut Hook) -> *mut Hook {
+unsafe fn get_hook<Outer, const OFFSET: usize>(p: *mut Outer) -> *mut Hook<Outer> {
+    p.byte_add(OFFSET) as *mut Hook<Outer>
+}
+
+pub unsafe fn push_front<Outer, const OFFSET: usize>(head: *mut Outer, new_node: *mut Outer) -> *mut Outer {
     unsafe {
+        let new_hook = get_hook::<_, OFFSET>(new_node);
         if head.is_null() {
-            (*new_node).next = null_mut();
-            (*new_node).prev = null_mut();
+            (*new_hook).next = null_mut();
+            (*new_hook).prev = null_mut();
             return new_node;
         }
 
-        assert_eq!((*head).prev, null_mut());
+        let head_hook = get_hook::<_, OFFSET>(head);
+        assert_eq!((*head_hook).prev, null_mut());
 
-        (*new_node).next = head;
-        (*new_node).prev = null_mut();
-        (*head).prev = new_node;
+        (*new_hook).next = head;
+        (*new_hook).prev = null_mut();
+        (*head_hook).prev = new_node;
         new_node
     }
 }
 
-pub unsafe fn unlink(head: *mut Hook, node: *mut Hook) -> *mut Hook {
+pub unsafe fn unlink<Outer, const OFFSET: usize>(
+    head: *mut Outer,
+    node: *mut Outer,
+) -> *mut Outer {
     assert_ne!(node, null_mut());
     unsafe {
-        if !(*node).prev.is_null() {
-            (*(*node).prev).next = (*node).next;
+        let node_hook = get_hook::<_, OFFSET>(node);
+        if !(*node_hook).prev.is_null() {
+            let prev_hook = get_hook::<_, OFFSET>((*node_hook).prev);
+            (*prev_hook).next = (*node_hook).next;
         }
-        if !(*node).next.is_null() {
-            (*(*node).next).prev = (*node).prev;
+        if !(*node_hook).next.is_null() {
+            let next_hook = get_hook::<_, OFFSET>((*node_hook).next);
+            (*next_hook).prev = (*node_hook).prev;
         }
-        let next = (*node).next;
-        (*node).next = null_mut();
-        (*node).prev = null_mut();
+        let next = (*node_hook).next;
+        (*node_hook).next = null_mut();
+        (*node_hook).prev = null_mut();
         if node == head {
             next
         } else {
@@ -75,13 +86,10 @@ pub unsafe fn unlink(head: *mut Hook, node: *mut Hook) -> *mut Hook {
     }
 }
 
-pub unsafe fn iterate<Entry, const OFFSET: usize>(
-    head: *mut Hook,
-) -> impl Iterator<Item = NonNull<Entry>> {
-    Iter::<Entry, OFFSET> {
-        p: head,
-        _phantom: PhantomData,
-    }
+pub unsafe fn iterate<Outer, const OFFSET: usize>(
+    head: *mut Outer,
+) -> impl Iterator<Item = NonNull<Outer>> {
+    Iter::<Outer, OFFSET> { p: head }
 }
 
 #[cfg(test)]
@@ -92,27 +100,24 @@ mod tests {
     #[derive(Debug, Default)]
     struct Entry {
         x: i64,
-        hook: UnsafeCell<Hook>,
+        hook: UnsafeCell<Hook<Entry>>,
     }
     const HOOK_OFFSET: usize = offset_of!(Entry, hook);
 
     #[test]
     fn test_linked_list() {
-        let mut v = Vec::new();
+        let mut head: *mut Entry = null_mut();
         for i in 0..10 {
-            v.push(Entry {
+            let p = Box::into_raw(Box::new(Entry {
                 x: i,
                 ..Default::default()
-            })
-        }
-        let mut head = null_mut();
-        for i in 0..10 {
-            let p = v[i].hook.get();
-            head = unsafe { push_front(head, p) };
+            }));
+            head = unsafe { push_front::<_, HOOK_OFFSET>(head, p) };
         }
         for p in unsafe { iterate::<Entry, HOOK_OFFSET>(head) } {
             let x = unsafe { p.as_ref() }.x;
             println!("{}", x);
+            unsafe { drop(Box::from_raw(p.as_ptr())) };
         }
     }
 
@@ -122,7 +127,7 @@ mod tests {
         Unlink(usize),
     }
 
-    fn print_list(head: *mut Hook) {
+    fn print_list(head: *mut Entry) {
         let v: Vec<_> = unsafe {
             iterate::<Entry, HOOK_OFFSET>(head).map(|p| p.as_ref().x).collect()
         };
@@ -132,7 +137,7 @@ mod tests {
     #[test]
     fn randomized_test() {
         let mut expected = VecDeque::new();
-        let mut head: *mut Hook = null_mut();
+        let mut head: *mut Entry = null_mut();
 
         for i in 0..1000 {
             let action = {
@@ -160,24 +165,30 @@ mod tests {
                 Action::PushFront(x) => {
                     expected.push_front(x);
 
-                    let new_entry = Box::leak(Box::new(Entry {
+                    let new_entry = Box::into_raw(Box::new(Entry {
                         x,
                         ..Default::default()
                     }));
-                    head = unsafe { push_front(head, new_entry.hook.get_mut()) }
+                    head = unsafe { push_front::<_, HOOK_OFFSET>(head, new_entry) }
                 }
                 Action::Unlink(idx) => {
                     let expected_x = expected.remove(idx).unwrap();
 
-                    let mut entry = unsafe { iterate::<Entry, HOOK_OFFSET>(head) }
+                    let entry = unsafe { iterate::<Entry, HOOK_OFFSET>(head) }
                         .nth(idx)
                         .unwrap();
                     let actual_x = unsafe { entry.as_ref().x };
-                    head = unsafe { unlink(head, entry.as_mut().hook.get_mut()) };
+                    head = unsafe { unlink::<_, HOOK_OFFSET>(head, entry.as_ptr()) };
 
                     assert_eq!(expected_x, actual_x);
+
+                    unsafe { drop(Box::from_raw(entry.as_ptr())) };
                 }
             }
+        }
+        // deallocate
+        for p in unsafe { iterate::<Entry, HOOK_OFFSET>(head) } {
+            unsafe { drop(Box::from_raw(p.as_ptr())) };
         }
     }
 }
