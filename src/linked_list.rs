@@ -1,12 +1,9 @@
-use std::{
-    cell::UnsafeCell,
-    ptr::{null_mut, NonNull},
-};
+use std::{cell::UnsafeCell, ptr::null_mut, rc::Rc};
 
 #[derive(Debug)]
 pub struct Hook<Outer> {
-    next: *mut Outer,
-    prev: *mut Outer,
+    next: *const Outer,
+    prev: *const Outer,
 }
 
 impl<Outer> Default for Hook<Outer> {
@@ -24,7 +21,7 @@ pub trait Adapter {
 }
 
 pub struct LinkedList<A: Adapter> {
-    head: *mut A::Outer,
+    head: *const A::Outer,
 }
 
 impl<A: Adapter> LinkedList<A> {
@@ -36,43 +33,44 @@ impl<A: Adapter> LinkedList<A> {
         self.head.is_null()
     }
 
-    pub unsafe fn push_front(&mut self, new_node: *mut A::Outer) {
+    pub unsafe fn push_front(&mut self, new_node: Rc<A::Outer>) {
         self.head = push_front::<A>(self.head, new_node);
     }
 
-    pub unsafe fn unlink(&mut self, node: *mut A::Outer) {
-        self.head = unlink::<A>(self.head, node);
+    #[must_use]
+    pub unsafe fn unlink(&mut self, node: *const A::Outer) -> Rc<A::Outer> {
+        let (new_head, unlinked_node) = unlink::<A>(self.head, node);
+        self.head = new_head;
+        unlinked_node
     }
 
-    pub fn iter(&mut self) -> impl Iterator<Item = NonNull<A::Outer>> {
+    pub fn iter(&mut self) -> impl Iterator<Item = *const A::Outer> {
         unsafe { iterate::<A>(self.head) }
     }
 }
 
 struct Iter<A: Adapter> {
-    p: *mut A::Outer,
+    p: *const A::Outer,
 }
 
 impl<A: Adapter> Iterator for Iter<A> {
-    type Item = NonNull<A::Outer>;
+    type Item = *const A::Outer;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.p.is_null() {
             return None;
         }
         unsafe {
-            let item = NonNull::new_unchecked(self.p);
+            let p = self.p;
             let hook = A::hook(&*self.p).get();
             self.p = (*hook).next;
-            Some(item)
+            Some(p)
         }
     }
 }
 
-unsafe fn push_front<A: Adapter>(
-    head: *mut A::Outer,
-    new_node: *mut A::Outer,
-) -> *mut A::Outer {
+unsafe fn push_front<A: Adapter>(head: *const A::Outer, new_node: Rc<A::Outer>) -> *const A::Outer {
+    let new_node = Rc::into_raw(new_node);
     unsafe {
         let new_hook = A::hook(&*new_node).get();
         if head.is_null() {
@@ -92,9 +90,9 @@ unsafe fn push_front<A: Adapter>(
 }
 
 unsafe fn unlink<A: Adapter>(
-    head: *mut A::Outer,
-    node: *mut A::Outer,
-) -> *mut A::Outer {
+    head: *const A::Outer,
+    node: *const A::Outer,
+) -> (*const A::Outer, Rc<A::Outer>) {
     assert_ne!(node, null_mut());
     unsafe {
         let node_hook = A::hook(&*node).get();
@@ -110,16 +108,14 @@ unsafe fn unlink<A: Adapter>(
         (*node_hook).next = null_mut();
         (*node_hook).prev = null_mut();
         if node == head {
-            next
+            (next, Rc::from_raw(node))
         } else {
-            head
+            (head, Rc::from_raw(node))
         }
     }
 }
 
-unsafe fn iterate<A: Adapter>(
-    head: *mut A::Outer,
-) -> impl Iterator<Item = NonNull<A::Outer>> {
+unsafe fn iterate<A: Adapter>(head: *const A::Outer) -> impl Iterator<Item = *const A::Outer> {
     Iter::<A> { p: head }
 }
 
@@ -146,17 +142,17 @@ mod tests {
     fn test_linked_list() {
         let mut list = LinkedList::<EntryAdapter>::new();
         for i in 0..10 {
-            let p = Box::into_raw(Box::new(Entry {
+            let entry = Rc::new(Entry {
                 x: i,
                 ..Default::default()
-            }));
-            unsafe { list.push_front(p) };
+            });
+            unsafe { list.push_front(entry) };
         }
         for p in list.iter() {
-            let x = unsafe { p.as_ref() }.x;
+            let x = unsafe { (*p).x };
             println!("{}", x);
             // deallocate
-            unsafe { drop(Box::from_raw(p.as_ptr())) };
+            let _ = unsafe { list.unlink(p) };
         }
     }
 
@@ -167,7 +163,7 @@ mod tests {
     }
 
     fn print_list(list: &mut LinkedList<EntryAdapter>) {
-        let v: Vec<_> = unsafe { list.iter().map(|p| p.as_ref().x).collect() };
+        let v: Vec<_> = unsafe { list.iter().map(|p| (*p).x).collect() };
         println!("{:?}", v);
     }
 
@@ -194,10 +190,10 @@ mod tests {
                 Action::PushFront(x) => {
                     expected.push_front(x);
 
-                    let new_entry = Box::into_raw(Box::new(Entry {
+                    let new_entry = Rc::new(Entry {
                         x,
                         ..Default::default()
-                    }));
+                    });
                     unsafe { list.push_front(new_entry) };
                 }
                 Action::Unlink(idx) => {
@@ -205,12 +201,10 @@ mod tests {
 
                     unsafe {
                         let entry = list.iter().nth(idx).unwrap();
-                        let actual_x = entry.as_ref().x;
-                        list.unlink(entry.as_ptr());
+                        let actual_x = (*entry).x;
+                        let _ = list.unlink(entry);
 
                         assert_eq!(expected_x, actual_x);
-
-                        drop(Box::from_raw(entry.as_ptr()));
                     }
                 }
             }
@@ -218,9 +212,7 @@ mod tests {
 
         // deallocate
         for p in list.iter() {
-            unsafe {
-                drop(Box::from_raw(p.as_ptr()));
-            }
+            let _ = unsafe { list.unlink(p) };
         }
     }
 }
