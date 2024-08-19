@@ -49,7 +49,7 @@ impl<A: Adapter> LinkedList<A> {
     }
 }
 
-pub struct Iter<A: Adapter> {
+struct Iter<A: Adapter> {
     p: *mut A::Outer,
 }
 
@@ -69,7 +69,7 @@ impl<A: Adapter> Iterator for Iter<A> {
     }
 }
 
-pub unsafe fn push_front<A: Adapter>(
+unsafe fn push_front<A: Adapter>(
     head: *mut A::Outer,
     new_node: *mut A::Outer,
 ) -> *mut A::Outer {
@@ -91,7 +91,7 @@ pub unsafe fn push_front<A: Adapter>(
     }
 }
 
-pub unsafe fn unlink<A: Adapter>(
+unsafe fn unlink<A: Adapter>(
     head: *mut A::Outer,
     node: *mut A::Outer,
 ) -> *mut A::Outer {
@@ -117,7 +117,7 @@ pub unsafe fn unlink<A: Adapter>(
     }
 }
 
-pub unsafe fn iterate<A: Adapter>(
+unsafe fn iterate<A: Adapter>(
     head: *mut A::Outer,
 ) -> impl Iterator<Item = NonNull<A::Outer>> {
     Iter::<A> { p: head }
