@@ -1,4 +1,4 @@
-use std::{cell::UnsafeCell, ptr::null_mut, rc::Rc};
+use std::{cell::RefCell, ptr::null, rc::Rc};
 
 #[derive(Debug)]
 pub struct Hook<Outer> {
@@ -9,15 +9,15 @@ pub struct Hook<Outer> {
 impl<Outer> Default for Hook<Outer> {
     fn default() -> Self {
         Self {
-            next: null_mut(),
-            prev: null_mut(),
+            next: null(),
+            prev: null(),
         }
     }
 }
 
 pub trait Adapter {
     type Outer;
-    fn hook(outer: &Self::Outer) -> &UnsafeCell<Hook<Self::Outer>>;
+    fn hook(outer: &Self::Outer) -> &RefCell<Hook<Self::Outer>>;
 }
 
 pub struct LinkedList<A: Adapter> {
@@ -26,7 +26,7 @@ pub struct LinkedList<A: Adapter> {
 
 impl<A: Adapter> LinkedList<A> {
     pub fn new() -> Self {
-        Self { head: null_mut() }
+        Self { head: null() }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -45,6 +45,8 @@ impl<A: Adapter> LinkedList<A> {
     //
     // # Safety
     // * `node` must be a member of the list.
+    // * `node` must be obtained from Rc::into_raw or Rc::as_ptr.
+    //    * Do not pass `rc.as_ref() as *const A::Outer`. It causes undefined behavior.
     #[must_use]
     pub unsafe fn unlink(&mut self, node: *const A::Outer) -> Rc<A::Outer> {
         let (new_head, unlinked_node) = unlink::<A>(self.head, node);
@@ -52,7 +54,7 @@ impl<A: Adapter> LinkedList<A> {
         unlinked_node
     }
 
-    pub fn iter(&mut self) -> impl Iterator<Item = *const A::Outer> {
+    pub fn iter(&mut self) -> impl Iterator<Item = Rc<A::Outer>> {
         unsafe { iterate::<A>(self.head) }
     }
 }
@@ -62,17 +64,21 @@ struct Iter<A: Adapter> {
 }
 
 impl<A: Adapter> Iterator for Iter<A> {
-    type Item = *const A::Outer;
+    type Item = Rc<A::Outer>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.p.is_null() {
             return None;
         }
         unsafe {
-            let p = self.p;
-            let hook = A::hook(&*self.p).get();
-            self.p = (*hook).next;
-            Some(p)
+            // Rc::clone from self.p
+            Rc::increment_strong_count(self.p);
+            let rc = Rc::from_raw(self.p);
+
+            let hook = A::hook(&*self.p).borrow();
+            self.p = hook.next;
+
+            Some(rc)
         }
     }
 }
@@ -80,19 +86,19 @@ impl<A: Adapter> Iterator for Iter<A> {
 unsafe fn push_front<A: Adapter>(head: *const A::Outer, new_node: Rc<A::Outer>) -> *const A::Outer {
     let new_node = Rc::into_raw(new_node);
     unsafe {
-        let new_hook = A::hook(&*new_node).get();
+        let mut new_hook = A::hook(&*new_node).borrow_mut();
         if head.is_null() {
-            (*new_hook).next = null_mut();
-            (*new_hook).prev = null_mut();
+            new_hook.next = null();
+            new_hook.prev = null();
             return new_node;
         }
 
-        let head_hook = A::hook(&*head).get();
-        assert_eq!((*head_hook).prev, null_mut());
+        let mut head_hook = A::hook(&*head).borrow_mut();
+        assert_eq!(head_hook.prev, null());
 
-        (*new_hook).next = head;
-        (*new_hook).prev = null_mut();
-        (*head_hook).prev = new_node;
+        new_hook.next = head;
+        new_hook.prev = null();
+        head_hook.prev = new_node;
         new_node
     }
 }
@@ -101,20 +107,20 @@ unsafe fn unlink<A: Adapter>(
     head: *const A::Outer,
     node: *const A::Outer,
 ) -> (*const A::Outer, Rc<A::Outer>) {
-    assert_ne!(node, null_mut());
+    assert_ne!(node, null());
     unsafe {
-        let node_hook = A::hook(&*node).get();
-        if !(*node_hook).prev.is_null() {
-            let prev_hook = A::hook(&*(*node_hook).prev).get();
-            (*prev_hook).next = (*node_hook).next;
+        let mut node_hook = A::hook(&*node).borrow_mut();
+        if !node_hook.prev.is_null() {
+            let mut prev_hook = A::hook(&*node_hook.prev).borrow_mut();
+            prev_hook.next = node_hook.next;
         }
-        if !(*node_hook).next.is_null() {
-            let next_hook = A::hook(&*(*node_hook).next).get();
-            (*next_hook).prev = (*node_hook).prev;
+        if !node_hook.next.is_null() {
+            let mut next_hook = A::hook(&*node_hook.next).borrow_mut();
+            next_hook.prev = (*node_hook).prev;
         }
-        let next = (*node_hook).next;
-        (*node_hook).next = null_mut();
-        (*node_hook).prev = null_mut();
+        let next = node_hook.next;
+        node_hook.next = null();
+        node_hook.prev = null();
         if node == head {
             (next, Rc::from_raw(node))
         } else {
@@ -123,25 +129,25 @@ unsafe fn unlink<A: Adapter>(
     }
 }
 
-unsafe fn iterate<A: Adapter>(head: *const A::Outer) -> impl Iterator<Item = *const A::Outer> {
+unsafe fn iterate<A: Adapter>(head: *const A::Outer) -> impl Iterator<Item = Rc<A::Outer>> {
     Iter::<A> { p: head }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{cell::UnsafeCell, collections::VecDeque};
+    use std::collections::VecDeque;
 
     #[derive(Debug, Default)]
     struct Entry {
         x: i64,
-        hook: UnsafeCell<Hook<Entry>>,
+        hook: RefCell<Hook<Entry>>,
     }
 
     struct EntryAdapter;
     impl Adapter for EntryAdapter {
         type Outer = Entry;
-        fn hook(outer: &Self::Outer) -> &UnsafeCell<Hook<Self::Outer>> {
+        fn hook(outer: &Self::Outer) -> &RefCell<Hook<Self::Outer>> {
             &outer.hook
         }
     }
@@ -157,10 +163,9 @@ mod tests {
             unsafe { list.push_front(entry) };
         }
         for p in list.iter() {
-            let x = unsafe { (*p).x };
-            println!("{}", x);
+            println!("{}", p.x);
             // deallocate
-            let _ = unsafe { list.unlink(p) };
+            let _ = unsafe { list.unlink(Rc::as_ptr(&p)) };
         }
     }
 
@@ -171,7 +176,7 @@ mod tests {
     }
 
     fn print_list(list: &mut LinkedList<EntryAdapter>) {
-        let v: Vec<_> = unsafe { list.iter().map(|p| (*p).x).collect() };
+        let v: Vec<_> = list.iter().map(|p| p.x).collect();
         println!("{:?}", v);
     }
 
@@ -207,20 +212,19 @@ mod tests {
                 Action::Unlink(idx) => {
                     let expected_x = expected.remove(idx).unwrap();
 
-                    unsafe {
-                        let entry = list.iter().nth(idx).unwrap();
-                        let actual_x = (*entry).x;
-                        let _ = list.unlink(entry);
+                    let entry = list.iter().nth(idx).unwrap();
+                    let actual_x = entry.x;
 
-                        assert_eq!(expected_x, actual_x);
-                    }
+                    let _ = unsafe { list.unlink(Rc::as_ptr(&entry)) };
+
+                    assert_eq!(expected_x, actual_x);
                 }
             }
         }
 
         // deallocate
         for p in list.iter() {
-            let _ = unsafe { list.unlink(p) };
+            let _ = unsafe { list.unlink(Rc::as_ptr(&p)) };
         }
     }
 }
