@@ -1,30 +1,7 @@
-use std::ptr::{null_mut, NonNull};
-
-pub struct LinkedList<Outer, const OFFSET: usize> {
-    head: *mut Outer,
-}
-
-impl<Outer, const OFFSET: usize> LinkedList<Outer, OFFSET> {
-    pub fn new() -> Self {
-        Self { head: null_mut() }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.head.is_null()
-    }
-
-    pub unsafe fn push_front(&mut self, new_node: *mut Outer) {
-        self.head = push_front::<Outer, OFFSET>(self.head, new_node);
-    }
-
-    pub unsafe fn unlink(&mut self, node: *mut Outer) {
-        self.head = unlink::<Outer, OFFSET>(self.head, node);
-    }
-
-    pub fn iter(&mut self) -> impl Iterator<Item = NonNull<Outer>> {
-        unsafe { iterate::<Outer, OFFSET>(self.head) }
-    }
-}
+use std::{
+    cell::UnsafeCell,
+    ptr::{null_mut, NonNull},
+};
 
 #[derive(Debug)]
 pub struct Hook<Outer> {
@@ -41,12 +18,43 @@ impl<Outer> Default for Hook<Outer> {
     }
 }
 
-pub struct Iter<Outer, const OFFSET: usize> {
-    p: *mut Outer,
+pub trait Adapter {
+    type Outer;
+    fn hook(outer: &Self::Outer) -> &UnsafeCell<Hook<Self::Outer>>;
 }
 
-impl<Outer, const OFFSET: usize> Iterator for Iter<Outer, OFFSET> {
-    type Item = NonNull<Outer>;
+pub struct LinkedList<A: Adapter> {
+    head: *mut A::Outer,
+}
+
+impl<A: Adapter> LinkedList<A> {
+    pub fn new() -> Self {
+        Self { head: null_mut() }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.head.is_null()
+    }
+
+    pub unsafe fn push_front(&mut self, new_node: *mut A::Outer) {
+        self.head = push_front::<A>(self.head, new_node);
+    }
+
+    pub unsafe fn unlink(&mut self, node: *mut A::Outer) {
+        self.head = unlink::<A>(self.head, node);
+    }
+
+    pub fn iter(&mut self) -> impl Iterator<Item = NonNull<A::Outer>> {
+        unsafe { iterate::<A>(self.head) }
+    }
+}
+
+pub struct Iter<A: Adapter> {
+    p: *mut A::Outer,
+}
+
+impl<A: Adapter> Iterator for Iter<A> {
+    type Item = NonNull<A::Outer>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.p.is_null() {
@@ -54,30 +62,26 @@ impl<Outer, const OFFSET: usize> Iterator for Iter<Outer, OFFSET> {
         }
         unsafe {
             let item = NonNull::new_unchecked(self.p);
-            let hook = self.p.byte_add(OFFSET) as *mut Hook<Outer>;
+            let hook = A::hook(&*self.p).get();
             self.p = (*hook).next;
             Some(item)
         }
     }
 }
 
-unsafe fn get_hook<Outer, const OFFSET: usize>(p: *mut Outer) -> *mut Hook<Outer> {
-    p.byte_add(OFFSET) as *mut Hook<Outer>
-}
-
-pub unsafe fn push_front<Outer, const OFFSET: usize>(
-    head: *mut Outer,
-    new_node: *mut Outer,
-) -> *mut Outer {
+pub unsafe fn push_front<A: Adapter>(
+    head: *mut A::Outer,
+    new_node: *mut A::Outer,
+) -> *mut A::Outer {
     unsafe {
-        let new_hook = get_hook::<_, OFFSET>(new_node);
+        let new_hook = A::hook(&*new_node).get();
         if head.is_null() {
             (*new_hook).next = null_mut();
             (*new_hook).prev = null_mut();
             return new_node;
         }
 
-        let head_hook = get_hook::<_, OFFSET>(head);
+        let head_hook = A::hook(&*head).get();
         assert_eq!((*head_hook).prev, null_mut());
 
         (*new_hook).next = head;
@@ -87,16 +91,19 @@ pub unsafe fn push_front<Outer, const OFFSET: usize>(
     }
 }
 
-pub unsafe fn unlink<Outer, const OFFSET: usize>(head: *mut Outer, node: *mut Outer) -> *mut Outer {
+pub unsafe fn unlink<A: Adapter>(
+    head: *mut A::Outer,
+    node: *mut A::Outer,
+) -> *mut A::Outer {
     assert_ne!(node, null_mut());
     unsafe {
-        let node_hook = get_hook::<_, OFFSET>(node);
+        let node_hook = A::hook(&*node).get();
         if !(*node_hook).prev.is_null() {
-            let prev_hook = get_hook::<_, OFFSET>((*node_hook).prev);
+            let prev_hook = A::hook(&*(*node_hook).prev).get();
             (*prev_hook).next = (*node_hook).next;
         }
         if !(*node_hook).next.is_null() {
-            let next_hook = get_hook::<_, OFFSET>((*node_hook).next);
+            let next_hook = A::hook(&*(*node_hook).next).get();
             (*next_hook).prev = (*node_hook).prev;
         }
         let next = (*node_hook).next;
@@ -110,27 +117,34 @@ pub unsafe fn unlink<Outer, const OFFSET: usize>(head: *mut Outer, node: *mut Ou
     }
 }
 
-pub unsafe fn iterate<Outer, const OFFSET: usize>(
-    head: *mut Outer,
-) -> impl Iterator<Item = NonNull<Outer>> {
-    Iter::<Outer, OFFSET> { p: head }
+pub unsafe fn iterate<A: Adapter>(
+    head: *mut A::Outer,
+) -> impl Iterator<Item = NonNull<A::Outer>> {
+    Iter::<A> { p: head }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{cell::UnsafeCell, collections::VecDeque, mem::offset_of};
+    use std::{cell::UnsafeCell, collections::VecDeque};
 
     #[derive(Debug, Default)]
     struct Entry {
         x: i64,
         hook: UnsafeCell<Hook<Entry>>,
     }
-    const HOOK_OFFSET: usize = offset_of!(Entry, hook);
+
+    struct EntryAdapter;
+    impl Adapter for EntryAdapter {
+        type Outer = Entry;
+        fn hook(outer: &Self::Outer) -> &UnsafeCell<Hook<Self::Outer>> {
+            &outer.hook
+        }
+    }
 
     #[test]
     fn test_linked_list() {
-        let mut list = LinkedList::<Entry, HOOK_OFFSET>::new();
+        let mut list = LinkedList::<EntryAdapter>::new();
         for i in 0..10 {
             let p = Box::into_raw(Box::new(Entry {
                 x: i,
@@ -152,7 +166,7 @@ mod tests {
         Unlink(usize),
     }
 
-    fn print_list(list: &mut LinkedList<Entry, HOOK_OFFSET>) {
+    fn print_list(list: &mut LinkedList<EntryAdapter>) {
         let v: Vec<_> = unsafe { list.iter().map(|p| p.as_ref().x).collect() };
         println!("{:?}", v);
     }
@@ -160,7 +174,7 @@ mod tests {
     #[test]
     fn randomized_test() {
         let mut expected = VecDeque::new();
-        let mut list = LinkedList::<Entry, HOOK_OFFSET>::new();
+        let mut list = LinkedList::<EntryAdapter>::new();
 
         for i in 0..1000 {
             let action = {
