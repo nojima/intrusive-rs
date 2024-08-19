@@ -2,6 +2,7 @@ use std::{cell::RefCell, ptr::null, rc::Rc};
 
 #[derive(Debug)]
 pub struct Hook<Outer> {
+    // Invariant: next and prev are obtained from Rc::into_raw().
     next: *const Outer,
     prev: *const Outer,
 }
@@ -43,7 +44,7 @@ impl<A: Adapter> LinkedList<A> {
     // Unlink `node` from the list and returns the ownership of `node`.
     //
     // # Safety
-    // * `node` must be a member of the list.
+    // * `node` must be a member of this list.
     #[must_use]
     pub unsafe fn unlink(&mut self, node: &Rc<A::Outer>) -> Rc<A::Outer> {
         let (new_head, unlinked_node) = unlink::<A>(self.head, node);
@@ -67,16 +68,18 @@ impl<A: Adapter> Iterator for Iter<A> {
         if self.p.is_null() {
             return None;
         }
-        unsafe {
-            // Rc::clone from self.p
+
+        // Rc::clone(self.p)
+        // Safety: self.p is obtained from Hook::next, which is obtained from Rc::into_raw().
+        let rc = unsafe {
             Rc::increment_strong_count(self.p);
-            let rc = Rc::from_raw(self.p);
+            Rc::from_raw(self.p)
+        };
 
-            let hook = A::hook(&*self.p).borrow();
-            self.p = hook.next;
+        let hook = A::hook(unsafe { &*self.p }).borrow();
+        self.p = hook.next;
 
-            Some(rc)
-        }
+        Some(rc)
     }
 }
 
@@ -112,32 +115,30 @@ unsafe fn unlink<A: Adapter>(
     head: *const A::Outer,
     node: &Rc<A::Outer>,
 ) -> (*const A::Outer, Rc<A::Outer>) {
-    unsafe {
-        let mut node_hook = A::hook(node).borrow_mut();
-        if !node_hook.prev.is_null() {
-            let mut prev_hook = A::hook(&*node_hook.prev).borrow_mut();
-            prev_hook.next = node_hook.next;
-        }
-        if !node_hook.next.is_null() {
-            let mut next_hook = A::hook(&*node_hook.next).borrow_mut();
-            next_hook.prev = (*node_hook).prev;
-        }
-        let next = node_hook.next;
-        node_hook.next = null();
-        node_hook.prev = null();
+    let mut node_hook = A::hook(node).borrow_mut();
+    if !node_hook.prev.is_null() {
+        let mut prev_hook = A::hook(unsafe { &*node_hook.prev }).borrow_mut();
+        prev_hook.next = node_hook.next;
+    }
+    if !node_hook.next.is_null() {
+        let mut next_hook = A::hook(unsafe { &*node_hook.next }).borrow_mut();
+        next_hook.prev = (*node_hook).prev;
+    }
+    let next = node_hook.next;
+    node_hook.next = null();
+    node_hook.prev = null();
 
-        // `let p_node = node.as_ref() as *const _` とすると
-        // `Rc::from_raw(p_node)` が undefined behavior になってしまう。
-        // 必ず Rc::as_ptr を使うこと。
-        let p_node = Rc::as_ptr(node);
-        // Safety: node を list に push するときに Rc::into_raw している。
-        //         よって、unlink の際に Rc::from_raw することで釣り合いが取れる。
-        let rc = Rc::from_raw(p_node);
-        if p_node == head {
-            (next, rc)
-        } else {
-            (head, rc)
-        }
+    // `let p_node = node.as_ref() as *const _` とすると
+    // `Rc::from_raw(p_node)` が undefined behavior になってしまう。
+    // 必ず Rc::as_ptr を使うこと。
+    let p_node = Rc::as_ptr(node);
+    // Safety: node を list に push するときに Rc::into_raw している。
+    //         よって、unlink の際に Rc::from_raw することで釣り合いが取れる。
+    let rc = unsafe { Rc::from_raw(p_node) };
+    if p_node == head {
+        (next, rc)
+    } else {
+        (head, rc)
     }
 }
 
