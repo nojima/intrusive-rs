@@ -35,10 +35,9 @@ impl<A: Adapter> LinkedList<A> {
 
     // Add `new_node` to the list.
     //
-    // # Safety
-    // * new_node must not be a member of the list.
-    pub unsafe fn push_front(&mut self, new_node: Rc<A::Outer>) {
-        self.head = push_front::<A>(self.head, new_node);
+    // `new_node` must not be a member of the list, or push_front panics.
+    pub fn push_front(&mut self, new_node: Rc<A::Outer>) {
+        self.head = unsafe { push_front::<A>(self.head, new_node) };
     }
 
     // Unlink `node` from the list and returns the ownership of `node`.
@@ -82,23 +81,31 @@ impl<A: Adapter> Iterator for Iter<A> {
 }
 
 unsafe fn push_front<A: Adapter>(head: *const A::Outer, new_node: Rc<A::Outer>) -> *const A::Outer {
-    let new_node = Rc::into_raw(new_node);
-    unsafe {
-        let mut new_hook = A::hook(&*new_node).borrow_mut();
-        if head.is_null() {
-            new_hook.next = null();
-            new_hook.prev = null();
-            return new_node;
-        }
-
-        let mut head_hook = A::hook(&*head).borrow_mut();
-        assert_eq!(head_hook.prev, null());
-
-        new_hook.next = head;
-        new_hook.prev = null();
-        head_hook.prev = new_node;
-        new_node
+    if Rc::as_ptr(&new_node) == head {
+        panic!("`new_node` must not be a member of a list");
     }
+
+    let mut new_hook = A::hook(&new_node).borrow_mut();
+
+    if new_hook.next != null() || new_hook.prev != null() {
+        panic!("`new_node` must not be a member of a list.")
+    }
+
+    if head.is_null() {
+        drop(new_hook); // unborrow
+        return Rc::into_raw(new_node);
+    }
+
+    let mut head_hook = A::hook(unsafe { &*head }).borrow_mut();
+    assert_eq!(head_hook.prev, null());
+
+    new_hook.next = head;
+    new_hook.prev = null();
+
+    drop(new_hook); // unborrow
+    let new_node = Rc::into_raw(new_node);
+    head_hook.prev = new_node;
+    new_node
 }
 
 unsafe fn unlink<A: Adapter>(
@@ -165,7 +172,7 @@ mod tests {
                 x: i,
                 ..Default::default()
             });
-            unsafe { list.push_front(entry) };
+            list.push_front(entry);
         }
         for p in list.iter() {
             println!("{}", p.x);
@@ -212,7 +219,7 @@ mod tests {
                         x,
                         ..Default::default()
                     });
-                    unsafe { list.push_front(new_entry) };
+                    list.push_front(new_entry);
                 }
                 Action::Unlink(idx) => {
                     let expected_x = expected.remove(idx).unwrap();
