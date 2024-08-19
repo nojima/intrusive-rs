@@ -45,10 +45,8 @@ impl<A: Adapter> LinkedList<A> {
     //
     // # Safety
     // * `node` must be a member of the list.
-    // * `node` must be obtained from Rc::into_raw or Rc::as_ptr.
-    //    * Do not pass `rc.as_ref() as *const A::Outer`. It causes undefined behavior.
     #[must_use]
-    pub unsafe fn unlink(&mut self, node: *const A::Outer) -> Rc<A::Outer> {
+    pub unsafe fn unlink(&mut self, node: &Rc<A::Outer>) -> Rc<A::Outer> {
         let (new_head, unlinked_node) = unlink::<A>(self.head, node);
         self.head = new_head;
         unlinked_node
@@ -105,11 +103,10 @@ unsafe fn push_front<A: Adapter>(head: *const A::Outer, new_node: Rc<A::Outer>) 
 
 unsafe fn unlink<A: Adapter>(
     head: *const A::Outer,
-    node: *const A::Outer,
+    node: &Rc<A::Outer>,
 ) -> (*const A::Outer, Rc<A::Outer>) {
-    assert_ne!(node, null());
     unsafe {
-        let mut node_hook = A::hook(&*node).borrow_mut();
+        let mut node_hook = A::hook(node).borrow_mut();
         if !node_hook.prev.is_null() {
             let mut prev_hook = A::hook(&*node_hook.prev).borrow_mut();
             prev_hook.next = node_hook.next;
@@ -121,10 +118,18 @@ unsafe fn unlink<A: Adapter>(
         let next = node_hook.next;
         node_hook.next = null();
         node_hook.prev = null();
-        if node == head {
-            (next, Rc::from_raw(node))
+
+        // `let p_node = node.as_ref() as *const _` とすると
+        // `Rc::from_raw(p_node)` が undefined behavior になってしまう。
+        // 必ず Rc::as_ptr を使うこと。
+        let p_node = Rc::as_ptr(node);
+        // Safety: node を list に push するときに Rc::into_raw している。
+        //         よって、unlink の際に Rc::from_raw することで釣り合いが取れる。
+        let rc = Rc::from_raw(p_node);
+        if p_node == head {
+            (next, rc)
         } else {
-            (head, Rc::from_raw(node))
+            (head, rc)
         }
     }
 }
@@ -165,7 +170,7 @@ mod tests {
         for p in list.iter() {
             println!("{}", p.x);
             // deallocate
-            let _ = unsafe { list.unlink(Rc::as_ptr(&p)) };
+            let _ = unsafe { list.unlink(&p) };
         }
     }
 
@@ -215,7 +220,7 @@ mod tests {
                     let entry = list.iter().nth(idx).unwrap();
                     let actual_x = entry.x;
 
-                    let _ = unsafe { list.unlink(Rc::as_ptr(&entry)) };
+                    let _ = unsafe { list.unlink(&entry) };
 
                     assert_eq!(expected_x, actual_x);
                 }
@@ -224,7 +229,7 @@ mod tests {
 
         // deallocate
         for p in list.iter() {
-            let _ = unsafe { list.unlink(Rc::as_ptr(&p)) };
+            let _ = unsafe { list.unlink(&p) };
         }
     }
 }
