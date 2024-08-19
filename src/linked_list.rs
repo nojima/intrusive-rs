@@ -53,33 +53,46 @@ impl<A: Adapter> LinkedList<A> {
     }
 
     pub fn iter(&mut self) -> impl Iterator<Item = Rc<A::Outer>> {
-        unsafe { iterate::<A>(self.head) }
+        if self.head.is_null() {
+            return Iter::<A> { p: None };
+        }
+
+        // Rc::clone(self.head)
+        // Safety: self.head is obtained from Rc::into_raw().
+        let rc = unsafe {
+            Rc::increment_strong_count(self.head);
+            Rc::from_raw(self.head)
+        };
+        Iter::<A> { p: Some(rc) }
     }
 }
 
 struct Iter<A: Adapter> {
-    p: *const A::Outer,
+    p: Option<Rc<A::Outer>>,
 }
 
 impl<A: Adapter> Iterator for Iter<A> {
     type Item = Rc<A::Outer>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.p.is_null() {
+        let Some(ref p) = self.p else {
             return None;
-        }
-
-        // Rc::clone(self.p)
-        // Safety: self.p is obtained from Hook::next, which is obtained from Rc::into_raw().
-        let rc = unsafe {
-            Rc::increment_strong_count(self.p);
-            Rc::from_raw(self.p)
         };
 
-        let hook = A::hook(unsafe { &*self.p }).borrow();
-        self.p = hook.next;
-
-        Some(rc)
+        let hook = A::hook(p).borrow();
+        let p_next = if hook.next.is_null() {
+            None
+        } else {
+            // Rc::clone(hook.next)
+            // Safety: hook.next is obtained from Rc::into_raw().
+            let rc = unsafe {
+                Rc::increment_strong_count(hook.next);
+                Rc::from_raw(hook.next)
+            };
+            Some(rc)
+        };
+        drop(hook); // unborrow
+        std::mem::replace(&mut self.p, p_next)
     }
 }
 
@@ -140,10 +153,6 @@ unsafe fn unlink<A: Adapter>(
     } else {
         (head, rc)
     }
-}
-
-unsafe fn iterate<A: Adapter>(head: *const A::Outer) -> impl Iterator<Item = Rc<A::Outer>> {
-    Iter::<A> { p: head }
 }
 
 #[cfg(test)]
