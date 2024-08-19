@@ -33,10 +33,18 @@ impl<A: Adapter> LinkedList<A> {
         self.head.is_null()
     }
 
+    // Add `new_node` to the list.
+    //
+    // # Safety
+    // * new_node must not be a member of the list.
     pub unsafe fn push_front(&mut self, new_node: Rc<A::Outer>) {
         self.head = push_front::<A>(self.head, new_node);
     }
 
+    // Unlink `node` from the list and returns the ownership of `node`.
+    //
+    // # Safety
+    // * `node` must be a member of the list.
     #[must_use]
     pub unsafe fn unlink(&mut self, node: *const A::Outer) -> Rc<A::Outer> {
         let (new_head, unlinked_node) = unlink::<A>(self.head, node);
