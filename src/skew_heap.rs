@@ -1,3 +1,5 @@
+#![warn(unsafe_op_in_unsafe_fn)]
+
 use std::{
     cell::RefCell,
     mem::swap,
@@ -65,7 +67,7 @@ pub unsafe fn meld<A: Adapter>(
     // do meld
     let mut hook1_borrow = A::hook(unsafe { &*root1 }).borrow_mut();
     let hook1 = hook1_borrow.deref_mut();
-    hook1.right = meld::<A>(hook1.right, root2, root1);
+    hook1.right = unsafe { meld::<A>(hook1.right, root2, root1) };
     swap(&mut hook1.left, &mut hook1.right);
     hook1.parent = parent;
     root1
@@ -93,7 +95,7 @@ pub unsafe fn imeld<A: Adapter>(
         return h1;
     }
 
-    ensure_ordering::<A>(&mut h1, &mut h2);
+    unsafe { ensure_ordering::<A>(&mut h1, &mut h2) };
 
     let new_root = h1;
 
@@ -108,7 +110,7 @@ pub unsafe fn imeld<A: Adapter>(
     let mut parent_hook_borrow = root_hook_borrow;
 
     while !h1.is_null() {
-        ensure_ordering::<A>(&mut h1, &mut h2);
+        unsafe { ensure_ordering::<A>(&mut h1, &mut h2) };
 
         let parent_hook = parent_hook_borrow.deref_mut();
         let mut h1_hook_borrow = A::hook(unsafe { &*h1 }).borrow_mut();
@@ -164,7 +166,7 @@ pub unsafe fn pop_min<A: Adapter>(
     };
     let new_root = unsafe { imeld::<A>(left, right) };
     if !new_root.is_null() {
-        set_parent::<A>(new_root, null());
+        unsafe { set_parent::<A>(new_root, null()) };
     }
 
     // Clear the hook for safety.
@@ -172,7 +174,7 @@ pub unsafe fn pop_min<A: Adapter>(
 
     // Since Rc::into_raw() was called when pushing the node to heap,
     // Rc::from_raw() need to be called when removing it from heap.
-    (new_root, Some(Rc::from_raw(root)))
+    (new_root, Some(unsafe { Rc::from_raw(root) }))
 }
 
 // Removes the given node from the heap and returns the new root and the ownership of the removed node.
@@ -188,9 +190,9 @@ pub unsafe fn unlink<A: Adapter>(
     };
 
     // Meld the children of the node.
-    let subtree = imeld::<A>(left, right);
+    let subtree = unsafe { imeld::<A>(left, right) };
     if !subtree.is_null() {
-        set_parent::<A>(subtree, parent);
+        unsafe { set_parent::<A>(subtree, parent) };
     }
 
     // Connect the subtree to the parent of the node.
@@ -208,7 +210,7 @@ pub unsafe fn unlink<A: Adapter>(
 
     // Since Rc::into_raw() was called when pushing the node to heap,
     // Rc::from_raw() need to be called when removing it from heap.
-    let rc = Rc::from_raw(Rc::as_ptr(node));
+    let rc = unsafe { Rc::from_raw(Rc::as_ptr(node)) };
     if Rc::as_ptr(node) == root {
         (subtree, rc)
     } else {
@@ -226,8 +228,8 @@ pub unsafe fn visit_all<A: Adapter>(root: *const A::Outer, f: &mut impl FnMut(Rc
     };
     f(rc);
     let root_hook = A::hook(unsafe { &*root }).borrow();
-    visit_all::<A>(root_hook.left, f);
-    visit_all::<A>(root_hook.right, f);
+    unsafe { visit_all::<A>(root_hook.left, f) };
+    unsafe { visit_all::<A>(root_hook.right, f) };
 }
 
 #[cfg(test)]
