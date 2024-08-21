@@ -96,16 +96,21 @@ pub unsafe fn imeld<A: Adapter>(
     ensure_ordering::<A>(&mut h1, &mut h2);
 
     let new_root = h1;
+
+    // skew root node
+    let mut root_hook_borrow = A::hook(unsafe { &*new_root }).borrow_mut();
+    let root_hook = root_hook_borrow.deref_mut();
+    std::mem::swap(&mut root_hook.right, &mut root_hook.left);
+
+    // setup loop variables
     let mut parent = h1;
-    let mut h1_hook_borrow = A::hook(unsafe { &*h1 }).borrow_mut();
-    let h1_hook = h1_hook_borrow.deref_mut();
-    h1 = std::mem::replace(&mut h1_hook.right, h1_hook.left);
-    drop(h1_hook_borrow); // unborrow
+    h1 = root_hook.left;
+    let mut parent_hook_borrow = root_hook_borrow;
 
     while !h1.is_null() {
         ensure_ordering::<A>(&mut h1, &mut h2);
 
-        let mut parent_hook = A::hook(unsafe { &*parent }).borrow_mut();
+        let parent_hook = parent_hook_borrow.deref_mut();
         let mut h1_hook_borrow = A::hook(unsafe { &*h1 }).borrow_mut();
         let h1_hook = h1_hook_borrow.deref_mut();
 
@@ -113,14 +118,16 @@ pub unsafe fn imeld<A: Adapter>(
         parent_hook.left = h1;
         h1_hook.parent = parent;
 
-        // update loop variables: the next `parent` is `h1`
-        parent = h1;
+        // skew `h1`
+        std::mem::swap(&mut h1_hook.right, &mut h1_hook.left);
 
-        // swap `h1.left` and `h1.right` and the next `h1` is old `h1.right`.
-        h1 = std::mem::replace(&mut h1_hook.right, h1_hook.left);
+        // update loop variables
+        parent = h1;
+        h1 = h1_hook.left;
+        parent_hook_borrow = h1_hook_borrow;
     }
 
-    A::hook(unsafe { &*parent }).borrow_mut().left = h2;
+    parent_hook_borrow.left = h2;
     A::hook(unsafe { &*h2 }).borrow_mut().parent = parent;
 
     new_root
@@ -315,7 +322,7 @@ mod tests {
 
         // deallocate
         while !root.is_null() {
-            let (new_root, _) = unsafe { pop_min::<EntryAdapter>(root)};
+            let (new_root, _) = unsafe { pop_min::<EntryAdapter>(root) };
             root = new_root;
         }
     }
