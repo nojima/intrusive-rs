@@ -48,6 +48,7 @@ pub unsafe fn meld<A: Adapter>(
     if h2.is_null() {
         return h1;
     }
+    assert_ne!(h1, h2, "h1 and h2 must be different heaps");
 
     unsafe { ensure_ordering::<A>(&mut h1, &mut h2) };
 
