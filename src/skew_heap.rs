@@ -71,7 +71,7 @@ pub unsafe fn meld<A: Adapter>(
     root1
 }
 
-// make sure that key(p1) <= key(p2)
+// Make sure that key(p1) <= key(p2)
 // p1 and p2 must not be null.
 unsafe fn ensure_ordering<A: Adapter>(p1: &mut *const A::Outer, p2: &mut *const A::Outer) {
     let key1 = A::key(unsafe { &**p1 });
@@ -143,10 +143,9 @@ pub unsafe fn push<A: Adapter>(root: *const A::Outer, new_node: Rc<A::Outer>) ->
     unsafe { imeld::<A>(root, Rc::into_raw(new_node)) }
 }
 
-// node must not be null
 unsafe fn set_parent<A: Adapter>(node: *const A::Outer, parent: *const A::Outer) {
-    let mut hook = A::hook(unsafe { &*node }).borrow_mut();
-    hook.parent = parent;
+    debug_assert_ne!(node, null());
+    A::hook(unsafe { &*node }).borrow_mut().parent = parent;
 }
 
 // Removes minimum element of the heap and returns (new_root, min_entry).
@@ -156,18 +155,23 @@ pub unsafe fn pop_min<A: Adapter>(
     if root.is_null() {
         return (null(), None);
     }
-    let mut root_hook = A::hook(unsafe { &*root }).borrow_mut();
-    assert_eq!(root_hook.parent, null(), "root.parent must be null");
 
-    let new_root = unsafe { imeld::<A>(root_hook.left, root_hook.right) };
-
+    // Meld the children of the root.
+    let (left, right) = {
+        let root_hook = A::hook(unsafe { &*root }).borrow();
+        debug_assert_eq!(root_hook.parent, null());
+        (root_hook.left, root_hook.right)
+    };
+    let new_root = unsafe { imeld::<A>(left, right) };
     if !new_root.is_null() {
         set_parent::<A>(new_root, null());
     }
 
-    root_hook.left = null();
-    root_hook.right = null();
-    drop(root_hook); // unborrow
+    // Clear the hook for safety.
+    A::hook(unsafe { &*root }).take();
+
+    // Since Rc::into_raw() was called when pushing the node to heap,
+    // Rc::from_raw() need to be called when removing it from heap.
     (new_root, Some(Rc::from_raw(root)))
 }
 
@@ -176,17 +180,20 @@ pub unsafe fn unlink<A: Adapter>(
     root: *const A::Outer,
     node: &Rc<A::Outer>,
 ) -> (*const A::Outer, Rc<A::Outer>) {
-    assert_ne!(root, null(), "root must not be null");
+    debug_assert_ne!(root, null(), "root must not be null");
 
-    let mut node_hook = A::hook(node.deref()).borrow_mut();
+    let (left, right, parent) = {
+        let node_hook = A::hook(node.deref()).borrow();
+        (node_hook.left, node_hook.right, node_hook.parent)
+    };
 
-    let subtree = imeld::<A>(node_hook.left, node_hook.right);
-
+    // Meld the children of the node.
+    let subtree = imeld::<A>(left, right);
     if !subtree.is_null() {
-        set_parent::<A>(subtree, node_hook.parent);
+        set_parent::<A>(subtree, parent);
     }
 
-    let parent = node_hook.parent;
+    // Connect the subtree to the parent of the node.
     if !parent.is_null() {
         let mut parent_hook = A::hook(unsafe { &*parent }).borrow_mut();
         if parent_hook.left == Rc::as_ptr(node) {
@@ -196,10 +203,11 @@ pub unsafe fn unlink<A: Adapter>(
         }
     }
 
-    node_hook.left = null();
-    node_hook.right = null();
-    node_hook.parent = null();
+    // Clear the hook for safety.
+    A::hook(node.deref()).take();
 
+    // Since Rc::into_raw() was called when pushing the node to heap,
+    // Rc::from_raw() need to be called when removing it from heap.
     let rc = Rc::from_raw(Rc::as_ptr(node));
     if Rc::as_ptr(node) == root {
         (subtree, rc)
