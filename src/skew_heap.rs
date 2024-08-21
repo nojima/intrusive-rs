@@ -2,7 +2,6 @@
 
 use std::{
     cell::RefCell,
-    mem::swap,
     ops::{Deref, DerefMut},
     ptr::null,
     rc::Rc,
@@ -32,47 +31,6 @@ pub trait Adapter {
     fn key(outer: &Self::Outer) -> &Self::Key;
 }
 
-// Melds the given two heaps and returns the root of the merged heap.
-pub unsafe fn meld<A: Adapter>(
-    root1: *const A::Outer,
-    root2: *const A::Outer,
-    parent: *const A::Outer,
-) -> *const A::Outer {
-    if root1.is_null() {
-        if root2.is_null() {
-            return null();
-        }
-        let mut hook2 = A::hook(unsafe { &*root2 }).borrow_mut();
-        hook2.parent = parent;
-        return root2;
-    }
-    if root2.is_null() {
-        let mut hook1 = A::hook(unsafe { &*root1 }).borrow_mut();
-        hook1.parent = parent;
-        return root1;
-    }
-
-    // make sure that root1 <= root2
-    let (root1, root2) = unsafe {
-        // NOTE: we create shared references to Entry here.
-        let key1 = A::key(&*root1);
-        let key2 = A::key(&*root2);
-        if key1 > key2 {
-            (root2, root1)
-        } else {
-            (root1, root2)
-        }
-    };
-
-    // do meld
-    let mut hook1_borrow = A::hook(unsafe { &*root1 }).borrow_mut();
-    let hook1 = hook1_borrow.deref_mut();
-    hook1.right = unsafe { meld::<A>(hook1.right, root2, root1) };
-    swap(&mut hook1.left, &mut hook1.right);
-    hook1.parent = parent;
-    root1
-}
-
 // Make sure that key(p1) <= key(p2)
 // p1 and p2 must not be null.
 unsafe fn ensure_ordering<A: Adapter>(p1: &mut *const A::Outer, p2: &mut *const A::Outer) {
@@ -84,7 +42,8 @@ unsafe fn ensure_ordering<A: Adapter>(p1: &mut *const A::Outer, p2: &mut *const 
 }
 
 // Melds the given two heaps and returns the root of the merged heap.
-pub unsafe fn imeld<A: Adapter>(
+// O(log n) amortized
+pub unsafe fn meld<A: Adapter>(
     mut h1: *const A::Outer,
     mut h2: *const A::Outer,
 ) -> *const A::Outer {
@@ -136,13 +95,14 @@ pub unsafe fn imeld<A: Adapter>(
 }
 
 // Inserts new_node into the heap and returns new root.
+// O(log n) amortized
 pub unsafe fn push<A: Adapter>(root: *const A::Outer, new_node: Rc<A::Outer>) -> *const A::Outer {
     let new_hook = A::hook(new_node.deref()).borrow();
     assert_eq!(new_hook.left, null(), "new_node.left must be null");
     assert_eq!(new_hook.right, null(), "new_node.right must be null");
     assert_eq!(new_hook.parent, null(), "new_node.parent must be null");
     drop(new_hook); // unborrow
-    unsafe { imeld::<A>(root, Rc::into_raw(new_node)) }
+    unsafe { meld::<A>(root, Rc::into_raw(new_node)) }
 }
 
 unsafe fn set_parent<A: Adapter>(node: *const A::Outer, parent: *const A::Outer) {
@@ -151,6 +111,7 @@ unsafe fn set_parent<A: Adapter>(node: *const A::Outer, parent: *const A::Outer)
 }
 
 // Removes minimum element of the heap and returns (new_root, min_entry).
+// O(log n) amortized
 pub unsafe fn pop_min<A: Adapter>(
     root: *const A::Outer,
 ) -> (*const A::Outer, Option<Rc<A::Outer>>) {
@@ -164,7 +125,7 @@ pub unsafe fn pop_min<A: Adapter>(
         debug_assert_eq!(root_hook.parent, null());
         (root_hook.left, root_hook.right)
     };
-    let new_root = unsafe { imeld::<A>(left, right) };
+    let new_root = unsafe { meld::<A>(left, right) };
     if !new_root.is_null() {
         unsafe { set_parent::<A>(new_root, null()) };
     }
@@ -178,6 +139,7 @@ pub unsafe fn pop_min<A: Adapter>(
 }
 
 // Removes the given node from the heap and returns the new root and the ownership of the removed node.
+// O(log n) amortized
 pub unsafe fn unlink<A: Adapter>(
     root: *const A::Outer,
     node: &Rc<A::Outer>,
@@ -190,7 +152,7 @@ pub unsafe fn unlink<A: Adapter>(
     };
 
     // Meld the children of the node.
-    let subtree = unsafe { imeld::<A>(left, right) };
+    let subtree = unsafe { meld::<A>(left, right) };
     if !subtree.is_null() {
         unsafe { set_parent::<A>(subtree, parent) };
     }
