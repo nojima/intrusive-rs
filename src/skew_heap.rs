@@ -112,9 +112,9 @@ pub unsafe fn imeld<A: Adapter>(
     while !h1.is_null() {
         unsafe { ensure_ordering::<A>(&mut h1, &mut h2) };
 
-        let parent_hook = parent_hook_borrow.deref_mut();
         let mut h1_hook_borrow = A::hook(unsafe { &*h1 }).borrow_mut();
         let h1_hook = h1_hook_borrow.deref_mut();
+        let parent_hook = parent_hook_borrow.deref_mut();
 
         // connect `h1` as the left child of `parent`.
         parent_hook.left = h1;
