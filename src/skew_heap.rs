@@ -1,25 +1,20 @@
 #![warn(unsafe_op_in_unsafe_fn)]
 
-use std::{
-    cell::RefCell,
-    ops::{Deref, DerefMut},
-    ptr::null,
-    rc::Rc,
-};
+use std::{cell::Cell, ops::Deref, ptr::null, rc::Rc};
 
 #[derive(Debug)]
 pub struct Hook<Outer> {
-    left: *const Outer,
-    right: *const Outer,
-    parent: *const Outer,
+    left: Cell<*const Outer>,
+    right: Cell<*const Outer>,
+    parent: Cell<*const Outer>,
 }
 
 impl<Outer> Default for Hook<Outer> {
     fn default() -> Self {
         Self {
-            left: null(),
-            right: null(),
-            parent: null(),
+            left: Cell::new(null()),
+            right: Cell::new(null()),
+            parent: Cell::new(null()),
         }
     }
 }
@@ -27,7 +22,7 @@ impl<Outer> Default for Hook<Outer> {
 pub trait Adapter {
     type Outer;
     type Key: Ord;
-    fn hook(outer: &Self::Outer) -> &RefCell<Hook<Self::Outer>>;
+    fn hook(outer: &Self::Outer) -> &Hook<Self::Outer>;
     fn key(outer: &Self::Outer) -> &Self::Key;
 }
 
@@ -59,37 +54,33 @@ pub unsafe fn meld<A: Adapter>(
     let new_root = h1;
 
     // skew root node
-    let mut root_hook_borrow = A::hook(unsafe { &*new_root }).borrow_mut();
-    let root_hook = root_hook_borrow.deref_mut();
-    std::mem::swap(&mut root_hook.right, &mut root_hook.left);
+    let root_hook = A::hook(unsafe { &*new_root });
+    root_hook.left.swap(&root_hook.right);
 
     // setup loop variables
     let mut parent = h1;
-    h1 = root_hook.left;
-    let mut parent_hook_borrow = root_hook_borrow;
+    h1 = root_hook.left.get();
 
     while !h1.is_null() {
         unsafe { ensure_ordering::<A>(&mut h1, &mut h2) };
 
-        let mut h1_hook_borrow = A::hook(unsafe { &*h1 }).borrow_mut();
-        let h1_hook = h1_hook_borrow.deref_mut();
-        let parent_hook = parent_hook_borrow.deref_mut();
+        let h1_hook = A::hook(unsafe { &*h1 });
+        let parent_hook = A::hook(unsafe { &*parent });
 
         // connect `h1` as the left child of `parent`.
-        parent_hook.left = h1;
-        h1_hook.parent = parent;
+        parent_hook.left.set(h1);
+        h1_hook.parent.set(parent);
 
         // skew `h1`
-        std::mem::swap(&mut h1_hook.right, &mut h1_hook.left);
+        h1_hook.left.swap(&h1_hook.right);
 
         // update loop variables
         parent = h1;
-        h1 = h1_hook.left;
-        parent_hook_borrow = h1_hook_borrow;
+        h1 = h1_hook.left.get();
     }
 
-    parent_hook_borrow.left = h2;
-    A::hook(unsafe { &*h2 }).borrow_mut().parent = parent;
+    A::hook(unsafe { &*parent }).left.set(h2);
+    A::hook(unsafe { &*h2 }).parent.set(parent);
 
     new_root
 }
@@ -97,17 +88,15 @@ pub unsafe fn meld<A: Adapter>(
 // Inserts new_node into the heap and returns new root.
 // O(log n) amortized
 pub unsafe fn push<A: Adapter>(root: *const A::Outer, new_node: Rc<A::Outer>) -> *const A::Outer {
-    let new_hook = A::hook(new_node.deref()).borrow();
-    assert_eq!(new_hook.left, null(), "new_node.left must be null");
-    assert_eq!(new_hook.right, null(), "new_node.right must be null");
-    assert_eq!(new_hook.parent, null(), "new_node.parent must be null");
-    drop(new_hook); // unborrow
+    let new_hook = A::hook(new_node.deref());
+    assert_eq!(new_hook.left.get(), null(), "new_node.left must be null");
+    assert_eq!(new_hook.right.get(), null(), "new_node.right must be null");
+    assert_eq!(
+        new_hook.parent.get(),
+        null(),
+        "new_node.parent must be null"
+    );
     unsafe { meld::<A>(root, Rc::into_raw(new_node)) }
-}
-
-unsafe fn set_parent<A: Adapter>(node: *const A::Outer, parent: *const A::Outer) {
-    debug_assert_ne!(node, null());
-    A::hook(unsafe { &*node }).borrow_mut().parent = parent;
 }
 
 // Removes the minimum element of the heap and returns (new_root, min_entry).
@@ -120,18 +109,17 @@ pub unsafe fn pop_min<A: Adapter>(
     }
 
     // Meld the children of the root.
-    let (left, right) = {
-        let root_hook = A::hook(unsafe { &*root }).borrow();
-        debug_assert_eq!(root_hook.parent, null());
-        (root_hook.left, root_hook.right)
-    };
-    let new_root = unsafe { meld::<A>(left, right) };
+    let root_hook = A::hook(unsafe { &*root });
+    debug_assert_eq!(root_hook.parent.get(), null());
+    let new_root = unsafe { meld::<A>(root_hook.left.get(), root_hook.right.get()) };
     if !new_root.is_null() {
-        unsafe { set_parent::<A>(new_root, null()) };
+        A::hook(unsafe { &*new_root }).parent.set(null());
     }
 
     // Clear the hook for safety.
-    A::hook(unsafe { &*root }).take();
+    root_hook.left.set(null());
+    root_hook.right.set(null());
+    root_hook.parent.set(null());
 
     // Since Rc::into_raw() was called when pushing the node to heap,
     // Rc::from_raw() need to be called when removing it from heap.
@@ -140,9 +128,7 @@ pub unsafe fn pop_min<A: Adapter>(
 
 // Returns the minimum element of the heap without removing it from the heap.
 // O(1)
-pub unsafe fn peek_min<A: Adapter>(
-    root: *const A::Outer
-) -> Option<Rc<A::Outer>> {
+pub unsafe fn peek_min<A: Adapter>(root: *const A::Outer) -> Option<Rc<A::Outer>> {
     if root.is_null() {
         return None;
     }
@@ -160,29 +146,29 @@ pub unsafe fn unlink<A: Adapter>(
 ) -> (*const A::Outer, Rc<A::Outer>) {
     debug_assert_ne!(root, null(), "root must not be null");
 
-    let (left, right, parent) = {
-        let node_hook = A::hook(node.deref()).borrow();
-        (node_hook.left, node_hook.right, node_hook.parent)
-    };
+    let node_hook = A::hook(node.deref());
+    let parent = node_hook.parent.get();
 
     // Meld the children of the node.
-    let subtree = unsafe { meld::<A>(left, right) };
+    let subtree = unsafe { meld::<A>(node_hook.left.get(), node_hook.right.get()) };
     if !subtree.is_null() {
-        unsafe { set_parent::<A>(subtree, parent) };
+        A::hook(unsafe { &*subtree }).parent.set(parent);
     }
 
     // Connect the subtree to the parent of the node.
     if !parent.is_null() {
-        let mut parent_hook = A::hook(unsafe { &*parent }).borrow_mut();
-        if parent_hook.left == Rc::as_ptr(node) {
-            parent_hook.left = subtree;
+        let parent_hook = A::hook(unsafe { &*parent });
+        if parent_hook.left.get() == Rc::as_ptr(node) {
+            parent_hook.left.set(subtree);
         } else {
-            parent_hook.right = subtree;
+            parent_hook.right.set(subtree);
         }
     }
 
     // Clear the hook for safety.
-    A::hook(node.deref()).take();
+    node_hook.left.set(null());
+    node_hook.right.set(null());
+    node_hook.parent.set(null());
 
     // Since Rc::into_raw() was called when pushing the node to heap,
     // Rc::from_raw() need to be called when removing it from heap.
@@ -203,27 +189,27 @@ pub unsafe fn visit_all<A: Adapter>(root: *const A::Outer, f: &mut impl FnMut(Rc
         Rc::from_raw(root)
     };
     f(rc);
-    let root_hook = A::hook(unsafe { &*root }).borrow();
-    unsafe { visit_all::<A>(root_hook.left, f) };
-    unsafe { visit_all::<A>(root_hook.right, f) };
+    let root_hook = A::hook(unsafe { &*root });
+    unsafe { visit_all::<A>(root_hook.left.get(), f) };
+    unsafe { visit_all::<A>(root_hook.right.get(), f) };
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{cell::RefCell, collections::BTreeSet};
+    use std::collections::BTreeSet;
 
     #[derive(Debug, Default)]
     struct Entry {
         x: i64,
-        hook: RefCell<Hook<Entry>>,
+        hook: Hook<Entry>,
     }
 
     struct EntryAdapter;
     impl Adapter for EntryAdapter {
         type Outer = Entry;
         type Key = i64;
-        fn hook(outer: &Self::Outer) -> &RefCell<Hook<Self::Outer>> {
+        fn hook(outer: &Self::Outer) -> &Hook<Self::Outer> {
             &outer.hook
         }
         fn key(outer: &Self::Outer) -> &Self::Key {
