@@ -1,24 +1,24 @@
-use std::{cell::RefCell, ptr::null, rc::Rc};
+use std::{cell::Cell, ptr::null, rc::Rc};
 
 #[derive(Debug)]
 pub struct Hook<Outer> {
     // Invariant: next and prev are obtained from Rc::into_raw().
-    next: *const Outer,
-    prev: *const Outer,
+    next: Cell<*const Outer>,
+    prev: Cell<*const Outer>,
 }
 
 impl<Outer> Default for Hook<Outer> {
     fn default() -> Self {
         Self {
-            next: null(),
-            prev: null(),
+            next: Cell::new(null()),
+            prev: Cell::new(null()),
         }
     }
 }
 
 pub trait Adapter {
     type Outer;
-    fn hook(outer: &Self::Outer) -> &RefCell<Hook<Self::Outer>>;
+    fn hook(outer: &Self::Outer) -> &Hook<Self::Outer>;
 }
 
 pub struct LinkedList<A: Adapter> {
@@ -79,19 +79,18 @@ impl<A: Adapter> Iterator for Iter<A> {
             return None;
         };
 
-        let hook = A::hook(p).borrow();
-        let p_next = if hook.next.is_null() {
+        let next = A::hook(p).next.get();
+        let p_next = if next.is_null() {
             None
         } else {
             // Rc::clone(hook.next)
-            // Safety: hook.next is obtained from Rc::into_raw().
+            // Safety: next is obtained from Rc::into_raw().
             let rc = unsafe {
-                Rc::increment_strong_count(hook.next);
-                Rc::from_raw(hook.next)
+                Rc::increment_strong_count(next);
+                Rc::from_raw(next)
             };
             Some(rc)
         };
-        drop(hook); // unborrow
         std::mem::replace(&mut self.p, p_next)
     }
 }
@@ -101,26 +100,24 @@ unsafe fn push_front<A: Adapter>(head: *const A::Outer, new_node: Rc<A::Outer>) 
         panic!("`new_node` must not be a member of a list");
     }
 
-    let mut new_hook = A::hook(&new_node).borrow_mut();
+    let new_hook = A::hook(&new_node);
 
-    if new_hook.next != null() || new_hook.prev != null() {
+    if new_hook.next.get() != null() || new_hook.prev.get() != null() {
         panic!("`new_node` must not be a member of a list.")
     }
 
     if head.is_null() {
-        drop(new_hook); // unborrow
         return Rc::into_raw(new_node);
     }
 
-    let mut head_hook = A::hook(unsafe { &*head }).borrow_mut();
-    assert_eq!(head_hook.prev, null());
+    let head_hook = A::hook(unsafe { &*head });
+    debug_assert_eq!(head_hook.prev.get(), null());
 
-    new_hook.next = head;
-    new_hook.prev = null();
+    new_hook.next.set(head);
+    new_hook.prev.set(null());
 
-    drop(new_hook); // unborrow
     let new_node = Rc::into_raw(new_node);
-    head_hook.prev = new_node;
+    head_hook.prev.set(new_node);
     new_node
 }
 
@@ -128,18 +125,18 @@ unsafe fn unlink<A: Adapter>(
     head: *const A::Outer,
     node: &Rc<A::Outer>,
 ) -> (*const A::Outer, Rc<A::Outer>) {
-    let mut node_hook = A::hook(node).borrow_mut();
-    if !node_hook.prev.is_null() {
-        let mut prev_hook = A::hook(unsafe { &*node_hook.prev }).borrow_mut();
-        prev_hook.next = node_hook.next;
+    let node_hook = A::hook(node);
+    let (next, prev) = (node_hook.next.get(), node_hook.prev.get());
+    if !prev.is_null() {
+        let prev_hook = A::hook(unsafe { &*prev });
+        prev_hook.next.set(next);
     }
-    if !node_hook.next.is_null() {
-        let mut next_hook = A::hook(unsafe { &*node_hook.next }).borrow_mut();
-        next_hook.prev = (*node_hook).prev;
+    if !next.is_null() {
+        let next_hook = A::hook(unsafe { &*next });
+        next_hook.prev.set(prev);
     }
-    let next = node_hook.next;
-    node_hook.next = null();
-    node_hook.prev = null();
+    node_hook.next.set(null());
+    node_hook.prev.set(null());
 
     // `let p_node = node.as_ref() as *const _` とすると
     // `Rc::from_raw(p_node)` が undefined behavior になってしまう。
@@ -163,13 +160,13 @@ mod tests {
     #[derive(Debug, Default)]
     struct Entry {
         x: i64,
-        hook: RefCell<Hook<Entry>>,
+        hook: Hook<Entry>,
     }
 
     struct EntryAdapter;
     impl Adapter for EntryAdapter {
         type Outer = Entry;
-        fn hook(outer: &Self::Outer) -> &RefCell<Hook<Self::Outer>> {
+        fn hook(outer: &Self::Outer) -> &Hook<Self::Outer> {
             &outer.hook
         }
     }
