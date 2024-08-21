@@ -1,5 +1,4 @@
 use std::{
-    borrow::Borrow,
     cell::RefCell,
     mem::swap,
     ops::{Deref, DerefMut},
@@ -54,8 +53,8 @@ pub unsafe fn meld<A: Adapter>(
     // make sure that root1 <= root2
     let (root1, root2) = unsafe {
         // NOTE: we create shared references to Entry here.
-        let key1 = A::key(&*root1).borrow();
-        let key2 = A::key(&*root2).borrow();
+        let key1 = A::key(&*root1);
+        let key2 = A::key(&*root2);
         if key1 > key2 {
             (root2, root1)
         } else {
@@ -72,6 +71,61 @@ pub unsafe fn meld<A: Adapter>(
     root1
 }
 
+// make sure that key(p1) <= key(p2)
+// p1 and p2 must not be null.
+unsafe fn ensure_ordering<A: Adapter>(p1: &mut *const A::Outer, p2: &mut *const A::Outer) {
+    let key1 = A::key(unsafe { &**p1 });
+    let key2 = A::key(unsafe { &**p2 });
+    if key1 > key2 {
+        std::mem::swap(p1, p2);
+    }
+}
+
+// Melds the given two heaps and returns the root of the merged heap.
+pub unsafe fn imeld<A: Adapter>(
+    mut h1: *const A::Outer,
+    mut h2: *const A::Outer,
+) -> *const A::Outer {
+    if h1.is_null() {
+        return h2;
+    }
+    if h2.is_null() {
+        return h1;
+    }
+
+    ensure_ordering::<A>(&mut h1, &mut h2);
+
+    let new_root = h1;
+    let mut parent = h1;
+    let mut h1_hook_borrow = A::hook(unsafe { &*h1 }).borrow_mut();
+    let h1_hook = h1_hook_borrow.deref_mut();
+    h1 = std::mem::replace(&mut h1_hook.right, h1_hook.left);
+    drop(h1_hook_borrow); // unborrow
+
+    while !h1.is_null() {
+        ensure_ordering::<A>(&mut h1, &mut h2);
+
+        let mut parent_hook = A::hook(unsafe { &*parent }).borrow_mut();
+        let mut h1_hook_borrow = A::hook(unsafe { &*h1 }).borrow_mut();
+        let h1_hook = h1_hook_borrow.deref_mut();
+
+        // connect `h1` as the left child of `parent`.
+        parent_hook.left = h1;
+        h1_hook.parent = parent;
+
+        // update loop variables: the next `parent` is `h1`
+        parent = h1;
+
+        // swap `h1.left` and `h1.right` and the next `h1` is old `h1.right`.
+        h1 = std::mem::replace(&mut h1_hook.right, h1_hook.left);
+    }
+
+    A::hook(unsafe { &*parent }).borrow_mut().left = h2;
+    A::hook(unsafe { &*h2 }).borrow_mut().parent = parent;
+
+    new_root
+}
+
 // Inserts new_node into the heap and returns new root.
 pub unsafe fn push<A: Adapter>(root: *const A::Outer, new_node: Rc<A::Outer>) -> *const A::Outer {
     let new_hook = A::hook(new_node.deref()).borrow();
@@ -79,7 +133,13 @@ pub unsafe fn push<A: Adapter>(root: *const A::Outer, new_node: Rc<A::Outer>) ->
     assert_eq!(new_hook.right, null(), "new_node.right must be null");
     assert_eq!(new_hook.parent, null(), "new_node.parent must be null");
     drop(new_hook); // unborrow
-    unsafe { meld::<A>(root, Rc::into_raw(new_node), null()) }
+    unsafe { imeld::<A>(root, Rc::into_raw(new_node)) }
+}
+
+// node must not be null
+unsafe fn set_parent<A: Adapter>(node: *const A::Outer, parent: *const A::Outer) {
+    let mut hook = A::hook(unsafe { &*node }).borrow_mut();
+    hook.parent = parent;
 }
 
 // Removes minimum element of the heap and returns (new_root, min_entry).
@@ -92,7 +152,11 @@ pub unsafe fn pop_min<A: Adapter>(
     let mut root_hook = A::hook(unsafe { &*root }).borrow_mut();
     assert_eq!(root_hook.parent, null(), "root.parent must be null");
 
-    let new_root = unsafe { meld::<A>(root_hook.left, root_hook.right, null()) };
+    let new_root = unsafe { imeld::<A>(root_hook.left, root_hook.right) };
+
+    if !new_root.is_null() {
+        set_parent::<A>(new_root, null());
+    }
 
     root_hook.left = null();
     root_hook.right = null();
@@ -109,7 +173,11 @@ pub unsafe fn unlink<A: Adapter>(
 
     let mut node_hook = A::hook(node.deref()).borrow_mut();
 
-    let subtree = meld::<A>(node_hook.left, node_hook.right, node_hook.parent);
+    let subtree = imeld::<A>(node_hook.left, node_hook.right);
+
+    if !subtree.is_null() {
+        set_parent::<A>(subtree, node_hook.parent);
+    }
 
     let parent = node_hook.parent;
     if !parent.is_null() {
