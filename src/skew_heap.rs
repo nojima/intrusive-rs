@@ -110,7 +110,7 @@ unsafe fn set_parent<A: Adapter>(node: *const A::Outer, parent: *const A::Outer)
     A::hook(unsafe { &*node }).borrow_mut().parent = parent;
 }
 
-// Removes minimum element of the heap and returns (new_root, min_entry).
+// Removes the minimum element of the heap and returns (new_root, min_entry).
 // O(log n) amortized
 pub unsafe fn pop_min<A: Adapter>(
     root: *const A::Outer,
@@ -136,6 +136,20 @@ pub unsafe fn pop_min<A: Adapter>(
     // Since Rc::into_raw() was called when pushing the node to heap,
     // Rc::from_raw() need to be called when removing it from heap.
     (new_root, Some(unsafe { Rc::from_raw(root) }))
+}
+
+// Returns the minimum element of the heap without removing it from the heap.
+// O(1)
+pub unsafe fn peek_min<A: Adapter>(
+    root: *const A::Outer
+) -> Option<Rc<A::Outer>> {
+    if root.is_null() {
+        return None;
+    }
+    unsafe {
+        Rc::increment_strong_count(root);
+        Some(Rc::from_raw(root))
+    }
 }
 
 // Removes the given node from the heap and returns the new root and the ownership of the removed node.
@@ -290,6 +304,10 @@ mod tests {
                     root = new_root;
                 }
             }
+
+            let actual_min = unsafe { peek_min::<EntryAdapter>(root) }.map(|p| p.x);
+            let expected_min = expected.first().map(|x| *x);
+            assert_eq!(expected_min, actual_min);
         }
 
         // deallocate
