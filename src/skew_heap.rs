@@ -2,13 +2,28 @@
 
 use std::{cell::Cell, marker::PhantomData, ops::Deref, ptr::null, rc::Rc};
 
-pub struct SkewHeap<A: Adapter> {
+use generativity::Id;
+
+pub struct SkewHeap<'id, A: Adapter<'id>> {
     root: *const A::Outer,
+    id: Id<'id>,
 }
 
-impl<A: Adapter> SkewHeap<A> {
-    pub fn new() -> Self {
-        Self { root: null() }
+impl<'id, A: Adapter<'id>> SkewHeap<'id, A> {
+    pub fn new(id: Id<'id>) -> Self {
+        Self {
+            root: null(),
+            id,
+        }
+    }
+
+    pub fn new_hook(&self) -> Hook<'id, A::Outer> {
+        Hook {
+            left: Cell::new(null()),
+            right: Cell::new(null()),
+            parent: Cell::new(out_of_heap_mark()),
+            _id: self.id,
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -40,7 +55,7 @@ impl<A: Adapter> SkewHeap<A> {
         unsafe { peek_min::<A>(self.root) }
     }
 
-    pub unsafe fn unlink(&mut self, node: &Rc<A::Outer>) -> Rc<A::Outer> {
+    pub fn unlink(&mut self, node: &Rc<A::Outer>) -> Rc<A::Outer> {
         let (new_root, removed_node) = unsafe { unlink::<A>(self.root, node) };
         self.root = new_root;
         removed_node
@@ -51,7 +66,7 @@ impl<A: Adapter> SkewHeap<A> {
     }
 }
 
-impl<A: Adapter> Drop for SkewHeap<A> {
+impl<'id, A: Adapter<'id>> Drop for SkewHeap<'id, A> {
     fn drop(&mut self) {
         while !self.is_empty() {
             let _ = self.pop_min();
@@ -60,10 +75,11 @@ impl<A: Adapter> Drop for SkewHeap<A> {
 }
 
 #[derive(Debug)]
-pub struct Hook<Outer> {
+pub struct Hook<'id, Outer> {
     left: Cell<*const Outer>,
     right: Cell<*const Outer>,
     parent: Cell<*const Outer>,
+    _id: Id<'id>,
 }
 
 // Since Rust does not have static_assert with type arguments yet,
@@ -93,17 +109,7 @@ fn out_of_heap_mark<Outer>() -> *const Outer {
     1 as *const Outer
 }
 
-impl<Outer> Default for Hook<Outer> {
-    fn default() -> Self {
-        Self {
-            left: Cell::new(null()),
-            right: Cell::new(null()),
-            parent: Cell::new(out_of_heap_mark()),
-        }
-    }
-}
-
-impl<Outer> Hook<Outer> {
+impl<'id, Outer> Hook<'id, Outer> {
     fn reset(&self) {
         self.left.set(null());
         self.right.set(null());
@@ -111,16 +117,19 @@ impl<Outer> Hook<Outer> {
     }
 }
 
-pub trait Adapter {
+pub trait Adapter<'id> {
     type Outer;
     type Key: Ord;
-    fn hook(outer: &Self::Outer) -> &Hook<Self::Outer>;
+    fn hook(outer: &Self::Outer) -> &Hook<'id, Self::Outer>;
     fn key(outer: &Self::Outer) -> &Self::Key;
 }
 
 // Make sure that key(p1) <= key(p2)
 // p1 and p2 must not be null.
-unsafe fn ensure_ordering<A: Adapter>(p1: &mut *const A::Outer, p2: &mut *const A::Outer) {
+unsafe fn ensure_ordering<'id, A: Adapter<'id>>(
+    p1: &mut *const A::Outer,
+    p2: &mut *const A::Outer,
+) {
     let key1 = A::key(unsafe { &**p1 });
     let key2 = A::key(unsafe { &**p2 });
     if key1 > key2 {
@@ -130,7 +139,7 @@ unsafe fn ensure_ordering<A: Adapter>(p1: &mut *const A::Outer, p2: &mut *const 
 
 // Melds the given two heaps and returns the root of the merged heap.
 // O(log n) amortized
-pub unsafe fn meld<A: Adapter>(
+pub unsafe fn meld<'id, A: Adapter<'id>>(
     mut h1: *const A::Outer,
     mut h2: *const A::Outer,
 ) -> *const A::Outer {
@@ -180,7 +189,10 @@ pub unsafe fn meld<A: Adapter>(
 
 // Inserts new_node into the heap and returns new root.
 // O(log n) amortized
-pub unsafe fn push<A: Adapter>(root: *const A::Outer, new_node: Rc<A::Outer>) -> *const A::Outer {
+pub unsafe fn push<'id, A: Adapter<'id>>(
+    root: *const A::Outer,
+    new_node: Rc<A::Outer>,
+) -> *const A::Outer {
     let new_hook = A::hook(new_node.deref());
     debug_assert_eq!(new_hook.left.get(), null(), "new_node.left must be null");
     debug_assert_eq!(new_hook.right.get(), null(), "new_node.right must be null");
@@ -194,7 +206,7 @@ pub unsafe fn push<A: Adapter>(root: *const A::Outer, new_node: Rc<A::Outer>) ->
 
 // Removes the minimum element of the heap and returns (new_root, min_entry).
 // O(log n) amortized
-pub unsafe fn pop_min<A: Adapter>(
+pub unsafe fn pop_min<'id, A: Adapter<'id>>(
     root: *const A::Outer,
 ) -> (*const A::Outer, Option<Rc<A::Outer>>) {
     if root.is_null() {
@@ -218,7 +230,7 @@ pub unsafe fn pop_min<A: Adapter>(
 
 // Returns the minimum element of the heap without removing it from the heap.
 // O(1)
-pub unsafe fn peek_min<A: Adapter>(root: *const A::Outer) -> Option<Rc<A::Outer>> {
+pub unsafe fn peek_min<'id, A: Adapter<'id>>(root: *const A::Outer) -> Option<Rc<A::Outer>> {
     if root.is_null() {
         return None;
     }
@@ -230,7 +242,7 @@ pub unsafe fn peek_min<A: Adapter>(root: *const A::Outer) -> Option<Rc<A::Outer>
 
 // Removes the given node from the heap and returns the new root and the ownership of the removed node.
 // O(log n) amortized
-pub unsafe fn unlink<A: Adapter>(
+pub unsafe fn unlink<'id, A: Adapter<'id>>(
     root: *const A::Outer,
     node: &Rc<A::Outer>,
 ) -> (*const A::Outer, Rc<A::Outer>) {
@@ -267,7 +279,10 @@ pub unsafe fn unlink<A: Adapter>(
     }
 }
 
-pub unsafe fn visit_all<A: Adapter>(root: *const A::Outer, f: &mut impl FnMut(Rc<A::Outer>)) {
+pub unsafe fn visit_all<'id, A: Adapter<'id>>(
+    root: *const A::Outer,
+    f: &mut impl FnMut(Rc<A::Outer>),
+) {
     if root.is_null() {
         return;
     }
@@ -286,17 +301,17 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
 
-    #[derive(Debug, Default)]
-    struct Entry {
+    #[derive(Debug)]
+    struct Entry<'id> {
         x: i64,
-        hook: Hook<Entry>,
+        hook: Hook<'id, Entry<'id>>,
     }
 
     struct EntryAdapter;
-    impl Adapter for EntryAdapter {
-        type Outer = Entry;
+    impl<'id> Adapter<'id> for EntryAdapter {
+        type Outer = Entry<'id>;
         type Key = i64;
-        fn hook(outer: &Self::Outer) -> &Hook<Self::Outer> {
+        fn hook(outer: &Self::Outer) -> &Hook<'id, Self::Outer> {
             &outer.hook
         }
         fn key(outer: &Self::Outer) -> &Self::Key {
@@ -321,8 +336,10 @@ mod tests {
 
     #[test]
     fn randomized_test() {
+        generativity::make_guard!(guard);
+
         let mut expected = BTreeSet::new();
-        let mut heap = SkewHeap::<EntryAdapter>::new();
+        let mut heap = SkewHeap::<EntryAdapter>::new(guard.into());
 
         for i in 0..1000 {
             let action = {
@@ -345,7 +362,7 @@ mod tests {
 
                     let new_entry = Rc::new(Entry {
                         x,
-                        ..Default::default()
+                        hook: heap.new_hook(),
                     });
                     heap.push(new_entry);
                 }
@@ -368,7 +385,7 @@ mod tests {
                             x_entry = Some(entry);
                         }
                     });
-                    let _ = unsafe { heap.unlink(&x_entry.unwrap()) };
+                    let _ = heap.unlink(&x_entry.unwrap());
                 }
             }
 
