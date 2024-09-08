@@ -1,6 +1,6 @@
 #![warn(unsafe_op_in_unsafe_fn)]
 
-use std::{cell::Cell, ops::Deref, ptr::null, rc::Rc};
+use std::{cell::Cell, marker::PhantomData, ops::Deref, ptr::null, rc::Rc};
 
 pub struct SkewHeap<A: Adapter> {
     root: *const A::Outer,
@@ -66,8 +66,28 @@ pub struct Hook<Outer> {
     parent: Cell<*const Outer>,
 }
 
+// Since Rust does not have static_assert with type arguments yet,
+// we emulate it with struct.
+macro_rules! static_assert_with_t {
+    ($t: ident, $expr: expr, $message: expr) => {{
+        struct StaticAssert<$t>(PhantomData<$t>);
+        impl<$t> StaticAssert<$t> {
+            const ASSERT: () = if !$expr {
+                panic!($message)
+            };
+        }
+        let _ = StaticAssert::<$t>::ASSERT;
+    }};
+}
+
 #[inline]
 fn out_of_heap_mark<Outer>() -> *const Outer {
+    static_assert_with_t!(
+        Outer,
+        align_of::<Outer>() >= 2,
+        "align of Outer must be >= 2"
+    );
+
     // It is safe to use address 1 as a mark.
     // Since the pointer is aligned, 1 does not conflict with a valid pointer.
     1 as *const Outer
