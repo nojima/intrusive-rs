@@ -2,6 +2,63 @@
 
 use std::{cell::Cell, ops::Deref, ptr::null, rc::Rc};
 
+pub struct SkewHeap<A: Adapter> {
+    root: *const A::Outer,
+}
+
+impl<A: Adapter> SkewHeap<A> {
+    pub fn new() -> Self {
+        Self { root: null() }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.root.is_null()
+    }
+
+    pub fn push(&mut self, new_node: Rc<A::Outer>) {
+        // precondition check
+        {
+            let hook = A::hook(&new_node);
+            assert_eq!(
+                hook.parent.get(),
+                out_of_heap_mark(),
+                "You are trying to push a node that already belongs to a heap."
+            );
+            hook.parent.set(null());
+        }
+
+        self.root = unsafe { push::<A>(self.root, new_node) };
+    }
+
+    pub fn pop_min(&mut self) -> Option<Rc<A::Outer>> {
+        let (new_root, popped_node) = unsafe { pop_min::<A>(self.root) };
+        self.root = new_root;
+        popped_node
+    }
+
+    pub fn peek_min(&self) -> Option<Rc<A::Outer>> {
+        unsafe { peek_min::<A>(self.root) }
+    }
+
+    pub unsafe fn unlink(&mut self, node: &Rc<A::Outer>) -> Rc<A::Outer> {
+        let (new_root, removed_node) = unsafe { unlink::<A>(self.root, node) };
+        self.root = new_root;
+        removed_node
+    }
+
+    pub fn visit_all(&self, f: &mut impl FnMut(Rc<A::Outer>)) {
+        unsafe { visit_all::<A>(self.root, f) }
+    }
+}
+
+impl<A: Adapter> Drop for SkewHeap<A> {
+    fn drop(&mut self) {
+        while !self.is_empty() {
+            let _ = self.pop_min();
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Hook<Outer> {
     left: Cell<*const Outer>,
@@ -9,13 +66,28 @@ pub struct Hook<Outer> {
     parent: Cell<*const Outer>,
 }
 
+#[inline]
+fn out_of_heap_mark<Outer>() -> *const Outer {
+    // It is safe to use address 1 as a mark.
+    // Since the pointer is aligned, 1 does not conflict with a valid pointer.
+    1 as *const Outer
+}
+
 impl<Outer> Default for Hook<Outer> {
     fn default() -> Self {
         Self {
             left: Cell::new(null()),
             right: Cell::new(null()),
-            parent: Cell::new(null()),
+            parent: Cell::new(out_of_heap_mark()),
         }
+    }
+}
+
+impl<Outer> Hook<Outer> {
+    fn reset(&self) {
+        self.left.set(null());
+        self.right.set(null());
+        self.parent.set(out_of_heap_mark());
     }
 }
 
@@ -90,9 +162,9 @@ pub unsafe fn meld<A: Adapter>(
 // O(log n) amortized
 pub unsafe fn push<A: Adapter>(root: *const A::Outer, new_node: Rc<A::Outer>) -> *const A::Outer {
     let new_hook = A::hook(new_node.deref());
-    assert_eq!(new_hook.left.get(), null(), "new_node.left must be null");
-    assert_eq!(new_hook.right.get(), null(), "new_node.right must be null");
-    assert_eq!(
+    debug_assert_eq!(new_hook.left.get(), null(), "new_node.left must be null");
+    debug_assert_eq!(new_hook.right.get(), null(), "new_node.right must be null");
+    debug_assert_eq!(
         new_hook.parent.get(),
         null(),
         "new_node.parent must be null"
@@ -117,10 +189,7 @@ pub unsafe fn pop_min<A: Adapter>(
         A::hook(unsafe { &*new_root }).parent.set(null());
     }
 
-    // Clear the hook for safety.
-    root_hook.left.set(null());
-    root_hook.right.set(null());
-    root_hook.parent.set(null());
+    root_hook.reset();
 
     // Since Rc::into_raw() was called when pushing the node to heap,
     // Rc::from_raw() need to be called when removing it from heap.
@@ -166,10 +235,7 @@ pub unsafe fn unlink<A: Adapter>(
         }
     }
 
-    // Clear the hook for safety.
-    node_hook.left.set(null());
-    node_hook.right.set(null());
-    node_hook.parent.set(null());
+    node_hook.reset();
 
     // Since Rc::into_raw() was called when pushing the node to heap,
     // Rc::from_raw() need to be called when removing it from heap.
@@ -225,20 +291,18 @@ mod tests {
         Unlink(usize),
     }
 
-    fn print_heap(root: *const Entry) {
+    fn print_heap(heap: &SkewHeap<EntryAdapter>) {
         let mut v = Vec::new();
-        unsafe {
-            visit_all::<EntryAdapter>(root, &mut |entry| {
-                v.push(entry.as_ref().x);
-            });
-        }
+        heap.visit_all(&mut |entry| {
+            v.push(entry.as_ref().x);
+        });
         println!("{:?}", v);
     }
 
     #[test]
     fn randomized_test() {
         let mut expected = BTreeSet::new();
-        let mut root: *const Entry = null();
+        let mut heap = SkewHeap::<EntryAdapter>::new();
 
         for i in 0..1000 {
             let action = {
@@ -253,7 +317,7 @@ mod tests {
                     }
                 }
             };
-            print_heap(root);
+            print_heap(&heap);
             println!("action = {:?}", action);
             match action {
                 Action::Push(x) => {
@@ -263,14 +327,13 @@ mod tests {
                         x,
                         ..Default::default()
                     });
-                    root = unsafe { push::<EntryAdapter>(root, new_entry) };
+                    heap.push(new_entry);
                 }
                 Action::PopMin => {
                     let expected_min = *expected.first().unwrap();
                     expected.remove(&expected_min);
 
-                    let (new_root, min_entry) = unsafe { pop_min::<EntryAdapter>(root) };
-                    root = new_root;
+                    let min_entry = heap.pop_min();
                     let actual_min = min_entry.unwrap().x;
                     assert_eq!(expected_min, actual_min);
                 }
@@ -280,27 +343,18 @@ mod tests {
 
                     // heap では idx 番目に小さい値が不明なので、expected_x を探して削除するということにする
                     let mut x_entry = None;
-                    unsafe {
-                        visit_all::<EntryAdapter>(root, &mut |entry| {
-                            if entry.x == expected_x {
-                                x_entry = Some(entry);
-                            }
-                        });
-                    }
-                    let (new_root, _) = unsafe { unlink::<EntryAdapter>(root, &x_entry.unwrap()) };
-                    root = new_root;
+                    heap.visit_all(&mut |entry| {
+                        if entry.x == expected_x {
+                            x_entry = Some(entry);
+                        }
+                    });
+                    let _ = unsafe { heap.unlink(&x_entry.unwrap()) };
                 }
             }
 
-            let actual_min = unsafe { peek_min::<EntryAdapter>(root) }.map(|p| p.x);
+            let actual_min = heap.peek_min().map(|p| p.x);
             let expected_min = expected.first().map(|x| *x);
             assert_eq!(expected_min, actual_min);
-        }
-
-        // deallocate
-        while !root.is_null() {
-            let (new_root, _) = unsafe { pop_min::<EntryAdapter>(root) };
-            root = new_root;
         }
     }
 }
